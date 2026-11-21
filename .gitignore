@@ -19,8 +19,10 @@ target/
 .dart_tool/
 .packages
 build/
-# 本仓库的 Dart 工程是库而非应用，锁文件不入库，避免锁定下游的解析结果
+# 协议库是库不是应用，锁文件不入库，避免锁定下游的解析结果。
+# Flutter 上位机是应用，只提交它自己的锁文件。
 pubspec.lock
+!dart/moli_usb_gui/pubspec.lock
 # dart doc 生成的 API 文档
 doc/api/
 

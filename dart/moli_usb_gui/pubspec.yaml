@@ -1,0 +1,28 @@
+name: space_firok_moli_usb_gui
+description: MSU2 USB screen host for Windows and Web. Connects one screen and sends host-composed frames.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  material_ui: ^1.5.0
+  space_firok_moli_usb_protocol:
+    path: ../moli_usb_protocol
+  flutter_libserialport: ^0.6.0
+  webserial: ^1.2.0
+  web: ^1.1.0
+  # Windows-only FFI. Web code must not import this; see lib/src/host/.
+  win32: ^5.5.1
+  ffi: ^2.1.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

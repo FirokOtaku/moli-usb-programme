@@ -453,11 +453,15 @@ final class MoliSession {
 
   // -------------------------------------------------------------- self-report
 
-  /// Reads and parses the 256-byte SFR self-description table at `0x0100`.
+  /// Reads and parses the 256-byte SFR self-description table at
+  /// [SfrTableParser.tableAddress].
   Future<List<SfrTableEntry>> readSelfDescription({CancelToken? token}) async {
     final table = Uint8List(256);
     for (var i = 0; i < 256; i++) {
-      table[i] = await readSfrU8(0x0100 + i, token: token);
+      table[i] = await readSfrU8(
+        SfrTableParser.tableAddress + i,
+        token: token,
+      );
     }
     return const SfrTableParser().parse(table);
   }

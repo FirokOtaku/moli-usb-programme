@@ -617,6 +617,48 @@ void main() {
       );
     });
 
+    test('drawPixelsRle 设置区域后发送 RleCodec 帧', () async {
+      final session = await connectedSession();
+      final api = MoliDeviceApi(session);
+      final port = session.port as FakeMsu2Port;
+      final before = port.writes.length;
+      await api.drawPixelsRle(
+        const Rect(1, 2, 5, 1),
+        const [
+          Rgb565Colors.red,
+          Rgb565Colors.red,
+          Rgb565Colors.red,
+          Rgb565Colors.black,
+          Rgb565Colors.black,
+        ],
+      );
+      final frames = port.writes.skip(before).toList();
+      expect(frames, hasLength(3));
+      expect(toHex(frames[0]), '020000010002');
+      expect(toHex(frames[1]), '020100050001');
+      expect(toHex(frames[2]), '0932F8000000');
+    });
+
+    test('drawPixelsRle 最坏帧数超过上界时拒绝且不发送', () async {
+      final session = await connectedSession();
+      final api = MoliDeviceApi(session);
+      final port = session.port as FakeMsu2Port;
+      final before = port.writes.length;
+      await expectLater(
+        api.drawPixelsRle(
+          const Rect(0, 0, 1, 1),
+          const [Rgb565Colors.red],
+          maxFrames: 1,
+        ),
+        throwsA(
+          isA<MoliException>()
+              .having((e) => e.kind, 'kind', MoliErrorKind.invalidArgument)
+              .having((e) => e.message, 'message', contains('drawPixels')),
+        ),
+      );
+      expect(port.writes.length, before);
+    });
+
     test('4x4 图片走完整的像素流帧序列', () async {
       final session = await connectedSession();
       final api = MoliDeviceApi(session);

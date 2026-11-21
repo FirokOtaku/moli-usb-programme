@@ -13,7 +13,9 @@
 
 import 'dart:async';
 
+import '../codec/adc_rle.dart';
 import '../codec/binary.dart';
+import '../codec/sfr.dart';
 import '../errors.dart';
 import '../model/device_candidate.dart';
 import '../model/device_capabilities.dart';
@@ -312,6 +314,54 @@ final class MoliDeviceApi {
   }) =>
       session.drawPixels(rect, pixels, token: token);
 
+  /// Streams [pixels] into [rect] as two-color RLE frames.
+  ///
+  /// The region is set the same way [drawPixels] does. Each following frame is
+  /// exactly what [RleCodec.encode] produces (command `0x09`); they are sent
+  /// through [MoliSession.request], the same path uncompressed frames use.
+  ///
+  /// When [maxFrames] is greater than 0 and [RleCodec.worstCaseFrameCount]
+  /// exceeds it, this throws [MoliErrorKind.invalidArgument] and sends nothing.
+  /// The message tells the caller to use [drawPixels].
+  Future<void> drawPixelsRle(
+    Rect rect,
+    List<Rgb565Color> pixels, {
+    int maxFrames = 0,
+    CancelToken? token,
+  }) async {
+    final expected = rect.width * rect.height;
+    if (pixels.length != expected) {
+      throw MoliException.invalidArgument(
+        'pixel count ${pixels.length} does not match region $rect ($expected)',
+        operation: 'drawPixelsRle',
+        deviceId: id?.value,
+      );
+    }
+    final worst = RleCodec.worstCaseFrameCount(pixels.length);
+    if (maxFrames > 0 && worst > maxFrames) {
+      throw MoliException.invalidArgument(
+        'RLE worst case needs $worst frames, which exceeds maxFrames '
+        '$maxFrames; use drawPixels',
+        operation: 'drawPixelsRle',
+        deviceId: id?.value,
+      );
+    }
+    rect.ensureWithin(
+      session.displayGeometry.width,
+      session.displayGeometry.height,
+      operation: 'drawPixelsRle',
+    );
+    await session.setRegion(rect, token: token);
+    final values = List<int>.generate(
+      pixels.length,
+      (index) => pixels[index].value & 0xFFFF,
+      growable: false,
+    );
+    for (final frame in RleCodec.encode(values)) {
+      await session.request(frame, token: token);
+    }
+  }
+
   /// Shows a color asset stored in device Flash at [page].
   Future<void> showFlashColor(int page, {CancelToken? token}) =>
       session.showFlashColor(page, token: token);
@@ -341,6 +391,9 @@ final class MoliDeviceApi {
       session.flashErasePages(page, count, token: token);
 
   /// Strobes one RGB LED (0..255 per channel) and applies the staged values.
+  ///
+  /// This still applies immediately. To change several lamps with one apply,
+  /// call [stageLed] for each index and then [applyLeds] once.
   Future<void> setLed(
     int index, {
     required int red,
@@ -351,6 +404,28 @@ final class MoliDeviceApi {
     await session.setLed(index, red, green, blue, token: token);
     await session.applyLeds(token: token);
   }
+
+  /// Stages one RGB LED without applying the staged values.
+  Future<void> stageLed(
+    int index, {
+    required int red,
+    required int green,
+    required int blue,
+    CancelToken? token,
+  }) =>
+      session.setLed(index, red, green, blue, token: token);
+
+  /// Applies staged LED values. Does not stage a new color.
+  Future<void> applyLeds({CancelToken? token}) =>
+      session.applyLeds(token: token);
+
+  /// Reads one byte of the self-description table.
+  ///
+  /// This is the SFR u8 read the session already implements
+  /// ([SfrTableParser.tableAddress]). It uses no new opcode and does not
+  /// change pixels, backlight, orientation, or LEDs.
+  Future<int> probeLink({CancelToken? token}) =>
+      session.readSfrU8(SfrTableParser.tableAddress, token: token);
 
   /// Input events, for devices with [DeviceCapabilities.keyInput] (MINI).
   Stream<InputEvent> get inputEvents => session.inputEvents;

@@ -153,11 +153,17 @@ final class SfrTableEntry {
 
 /// Parser for the SFR self-description table.
 ///
+/// [tableAddress] is the u8 address the session already reads. A single read
+/// there does not change pixels, backlight, orientation, or LEDs.
+///
 /// The vendor C parser has known defects (family 4 length handling). This
 /// parser follows the byte layout documented in the spec and reports
 /// [MoliErrorKind.malformedResponse] instead of guessing when the table ends
 /// prematurely.
 final class SfrTableParser {
+  /// First address of the 256-byte self-description table.
+  static const int tableAddress = 0x0100;
+
   const SfrTableParser();
 
   /// Parses entries out of [table] (up to 256 bytes read from 0x0100).

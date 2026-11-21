@@ -4,6 +4,8 @@
 .packages
 build/
 pubspec.lock
+# 上位机是应用，锁文件要入库。协议库的锁文件仍忽略。
+!moli_usb_gui/pubspec.lock
 doc/api/
 *.js.deps
 *.js.map

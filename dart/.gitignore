@@ -1,0 +1,17 @@
+# Dart 工具缓存与构建产物。本目录是 monorepo 中的 Dart 子树，不是独立仓库。
+# 这里的包是库而不是应用，锁文件不入库，避免锁定下游的解析结果。
+.dart_tool/
+.packages
+build/
+pubspec.lock
+doc/api/
+*.js.deps
+*.js.map
+
+# IDE 与临时文件
+*.iml
+*.ipr
+*.iws
+.idea/
+*.log
+*.tmp

@@ -1,0 +1,5 @@
+.dart_tool/
+build/
+*.js.deps
+*.js.map
+example.js

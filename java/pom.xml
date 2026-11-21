@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MSU2 屏幕项目 Java reactor 聚合 POM。
+
+  只聚合本仓库内的 Java 模块，供同一次 reactor 构建（mvn test / package）使用。
+  按仓库 AGENTS.md 约定：本 POM 不是对外发布的继承点，外部项目不要继承它；
+  未来需要对外 parent 时再单独发布。
+
+  版本说明：每个可发布模块使用独立版本号；此处 parent 自身版本仅用于 reactor
+  内部引用，不代表仓库总版本。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>space.firok</groupId>
+    <artifactId>moli-java-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>Moli USB Java Reactor</name>
+    <description>MSU2 USB 屏幕项目 Java 模块聚合（不对外发布继承）</description>
+
+    <modules>
+        <module>moli-usb-api</module>
+        <module>moli-usb-serial</module>
+    </modules>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <maven.compiler.parameters>true</maven.compiler.parameters>
+
+        <junit.version>5.11.4</junit.version>
+        <surefire.version>3.5.2</surefire.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.junit</groupId>
+                <artifactId>junit-bom</artifactId>
+                <version>${junit.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${surefire.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

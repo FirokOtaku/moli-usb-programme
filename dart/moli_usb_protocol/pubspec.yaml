@@ -1,0 +1,16 @@
+name: space_firok_moli_usb_protocol
+description: >-
+  Pure Dart protocol library for MSU2-series USB display devices. Implements the
+  four-layer architecture described in spec/architecture.md and the 6-byte wire
+  protocol described in spec/msu2-wire-protocol.md. Depends only on pure Dart
+  (no Flutter, no dart:ffi, no browser objects).
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+
+dev_dependencies:
+  test: ^1.24.0

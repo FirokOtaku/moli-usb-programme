@@ -1,0 +1,12 @@
+# Maven 构建产物。本目录是 monorepo 中的 Java 子树，不是独立仓库。
+target/
+*.class
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE 与临时文件
+*.iml
+*.ipr
+*.iws
+.idea/
+*.log
+*.tmp

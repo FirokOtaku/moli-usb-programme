@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MSU2 串口适配器（Java）。
+
+  本模块把 spec 描述的串口传输要求落到一个具体实现上，并提供人工实机探测工具
+  MoliProbe。它依赖 moli-usb-api（reactor 内坐标），但不反向被 api 依赖。
+
+  为什么 jSerialComm 只在这里、不进 moli-usb-api：核心库要保持传输层可注入、
+  不绑定具体串口实现（spec/architecture.md「传输层可注入」）。把厂商原生库塞进
+  核心库会让所有宿主被迫接受该实现与它的多平台原生库行为，也会让纯协议层
+  无法在无串口环境下编译测试。适配器模块可以换掉，核心库不行。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>space.firok</groupId>
+        <artifactId>moli-java-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <groupId>space.firok.moli.usb</groupId>
+    <artifactId>moli-usb-serial</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>Moli USB Serial</name>
+    <description>MSU2 串口适配器（jSerialComm）与命令行探测工具 MoliProbe</description>
+
+    <properties>
+        <!-- 纯 Java + 自带多平台原生库；Windows 上无需额外安装驱动级组件。 -->
+        <jserialcomm.version>2.11.4</jserialcomm.version>
+        <maven-jar-plugin.version>3.4.2</maven-jar-plugin.version>
+        <maven-shade-plugin.version>3.6.0</maven-shade-plugin.version>
+    </properties>
+
+    <dependencies>
+        <!-- 同一 reactor 内的模块依赖；不要先发布再依赖自己。 -->
+        <dependency>
+            <groupId>space.firok.moli.usb</groupId>
+            <artifactId>moli-usb-api</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fazecast</groupId>
+            <artifactId>jSerialComm</artifactId>
+            <version>${jserialcomm.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 普通 jar 也带 Main-Class，方便 java -cp ... MoliProbe 之类的手工调用。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>${maven-jar-plugin.version}</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>space.firok.moli.usb.serial.probe.MoliProbe</mainClass>
+                        </manifest>
+                        <manifestEntries>
+                            <!-- JDK 24+ 支持从可执行 jar 的清单声明原生访问，避免
+                                 jSerialComm 加载原生库时的 restricted method 警告。 -->
+                            <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+
+            <!--
+              带依赖的可执行 jar。用 shade 而不是 assembly：
+              只把 jSerialComm 与本模块 api 依赖合进来，避免 assembly 生成
+              多余的 bin/src 目录结构，也避免依赖描述符文件漂移。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>${maven-shade-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <shadedArtifactAttached>true</shadedArtifactAttached>
+                            <shadedClassifierName>jar-with-dependencies</shadedClassifierName>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>space.firok.moli.usb.serial.probe.MoliProbe</mainClass>
+                                    <manifestEntries>
+                                        <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
+                                    </manifestEntries>
+                                </transformer>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

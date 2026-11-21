@@ -61,6 +61,28 @@ public interface MoliDevice extends AutoCloseable {
     void setBacklight(int pwm);
 
     /**
+     * 设置一盏 RGB 灯的暂存颜色。
+     *
+     * <p>只发送这一盏灯的暂存帧，不提交。调用方改完需要的灯之后，再调用
+     * {@link #applyLeds()} 一次。</p>
+     *
+     * @param index 灯序号，0..255
+     * @param red   0..255
+     * @param green 0..255
+     * @param blue  0..255
+     * @throws space.firok.moli.usb.api.error.UnsupportedCapabilityError 设备不声明 RGB 灯能力
+     * @throws space.firok.moli.usb.api.error.InvalidArgumentError       序号或颜色超出字节范围
+     */
+    void setLed(int index, int red, int green, int blue);
+
+    /**
+     * 提交已暂存的 RGB 灯颜色。
+     *
+     * @throws space.firok.moli.usb.api.error.UnsupportedCapabilityError 设备不声明 RGB 灯能力
+     */
+    void applyLeds();
+
+    /**
      * 用单色填充矩形区域。
      *
      * @throws space.firok.moli.usb.api.error.InvalidArgumentError 矩形越出屏幕或参数非法
@@ -117,6 +139,13 @@ public interface MoliDevice extends AutoCloseable {
      * 监听回调在库内部的守护线程上执行，回调里不要做阻塞操作。</p>
      */
     InputSubscription subscribeInput(Consumer<space.firok.moli.usb.api.domain.InputEvent> listener);
+
+    /**
+     * 空闲探活：经当前会话读一次库里已经在读的 SFR 地址，不改变像素、背光、方向或灯。
+     *
+     * <p>不引入新的线协议操作码。传输断开、超时或协议失步按现有异常类型抛出。</p>
+     */
+    void probeLink();
 
     /** 关闭会话并释放设备占用。幂等。 */
     @Override

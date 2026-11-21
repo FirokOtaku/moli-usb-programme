@@ -6,6 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import space.firok.moli.usb.api.codec.DisplayAction;
+import space.firok.moli.usb.api.codec.DisplaySub;
+import space.firok.moli.usb.api.codec.SfrCodec;
+import space.firok.moli.usb.api.codec.SfrTableParser;
 import space.firok.moli.usb.api.domain.DeviceCandidate;
 import space.firok.moli.usb.api.domain.DeviceCapabilities;
 import space.firok.moli.usb.api.domain.DeviceId;
@@ -57,6 +61,11 @@ class MoliDeviceTest {
     private static MoliDevice openMini(ScriptedDevice device) {
         MoliUsb api = MoliUsb.over(device);
         return api.open(candidate("MINI-1", "COM-A"), options(DeviceProfile.mini(), device));
+    }
+
+    private static MoliDevice openLite(ScriptedDevice device) {
+        MoliUsb api = MoliUsb.over(device);
+        return api.open(candidate("LITE-1", "COM-A"), options(DeviceProfile.lite(), device));
     }
 
     @Nested
@@ -161,6 +170,19 @@ class MoliDeviceTest {
     @Nested
     @DisplayName("能力门控")
     class Capabilities {
+
+        @Test
+        @DisplayName("不声明 RGB 灯时 setLed 与 applyLeds 都拒绝，且不发帧")
+        void ledsRequireCapability() {
+            ScriptedDevice device = new ScriptedDevice("COM-A");
+            try (MoliDevice moli = openMini(device)) {
+                assertFalse(moli.capabilities().rgbLeds());
+                device.clearWrites();
+                assertThrows(UnsupportedCapabilityError.class, () -> moli.setLed(0, 1, 2, 3));
+                assertThrows(UnsupportedCapabilityError.class, moli::applyLeds);
+                assertEquals(0, device.frames().size());
+            }
+        }
 
         @Test
         @DisplayName("不声明背光时 setBacklight 报 UnsupportedCapabilityError")
@@ -307,6 +329,42 @@ class MoliDeviceTest {
         }
 
         @Test
+        @DisplayName("setLed 只发暂存帧，不顺带 applyLeds")
+        void setLedDoesNotApply() {
+            ScriptedDevice device = new ScriptedDevice("COM-A");
+            try (MoliDevice moli = openLite(device)) {
+                assertTrue(moli.capabilities().rgbLeds());
+                device.clearWrites();
+                moli.setLed(3, 1, 2, 4);
+                List<byte[]> writes = device.frames();
+                assertEquals(1, writes.size());
+                assertArrayEquals(frame(0x02, DisplaySub.SET_LED, 0x03, 0x01, 0x02, 0x04), writes.getFirst());
+                assertFalse(writes.stream().anyMatch(MoliDeviceTest::isApplyLeds),
+                        "setLed 不得发出 applyLeds");
+                device.clearWrites();
+                assertThrows(InvalidArgumentError.class, () -> moli.setLed(0, 256, 0, 0));
+                assertThrows(InvalidArgumentError.class, () -> moli.setLed(-1, 0, 0, 0));
+                assertEquals(0, device.frames().size(), "越界颜色或序号不得发帧");
+                moli.applyLeds();
+                assertArrayEquals(frame(0x02, 0x03, DisplayAction.APPLY_LEDS, 0x00, 0x00, 0x00),
+                        device.frames().getFirst());
+            }
+        }
+
+        @Test
+        @DisplayName("probeLink 只读自描述表起始地址，不写显示状态")
+        void probeLinkReadsExistingSfr() {
+            ScriptedDevice device = new ScriptedDevice("COM-A");
+            try (MoliDevice moli = openMini(device)) {
+                device.clearWrites();
+                moli.probeLink();
+                List<byte[]> writes = device.frames();
+                assertEquals(1, writes.size());
+                assertArrayEquals(SfrCodec.readU8(SfrTableParser.TABLE_ADDRESS).toWire(), writes.getFirst());
+            }
+        }
+
+        @Test
         @DisplayName("setOrientation 拒绝设备未声明的方向")
         void orientationMustBeSupported() {
             ScriptedDevice device = new ScriptedDevice("COM-A");
@@ -444,6 +502,13 @@ class MoliDeviceTest {
             Thread.sleep(10);
         }
         throw new AssertionError("等待条件超时");
+    }
+
+    private static boolean isApplyLeds(byte[] wire) {
+        return wire.length == 6
+                && (wire[0] & 0xFF) == 0x02
+                && (wire[1] & 0xFF) == 0x03
+                && (wire[2] & 0xFF) == DisplayAction.APPLY_LEDS;
     }
 
     private static byte[] frame(int... values) {

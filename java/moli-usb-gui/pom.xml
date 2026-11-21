@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MSU2 JavaFX 上位机：画面内容，以及按能力门控的方向、背光、RGB 灯和按键。
+
+  非模块化应用：没有 module-info.java。JavaFX 依赖放在 classpath 上，
+  由 javafx-maven-plugin 在 javafx:run 时放到 module path 并追加 add-modules。
+  不配置 GraalVM native-image。
+
+  javafx-graphics 由 javafx-controls 传递引入，不重复声明。
+  版本 25.0.1 已在 Maven Central 发布；若中央仓库不可达，保持该坐标，不要改到内网仓库。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>space.firok</groupId>
+        <artifactId>moli-java-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <groupId>space.firok.moli.usb</groupId>
+    <artifactId>moli-usb-gui</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>Moli USB GUI</name>
+    <description>MSU2 JavaFX 上位机：单设备连接、画面内容，以及按能力门控的方向、背光、RGB 灯和按键</description>
+
+    <properties>
+        <javafx.version>25.0.1</javafx.version>
+        <javafx.maven.plugin.version>0.0.8</javafx.maven.plugin.version>
+        <!-- 中央仓库坐标。若 Maven Central 不可达，保持此版本，不要改到内网仓库。 -->
+        <oshi.version>7.8.0</oshi.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>space.firok.moli.usb</groupId>
+            <artifactId>moli-usb-api</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>space.firok.moli.usb</groupId>
+            <artifactId>moli-usb-serial</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.openjfx</groupId>
+            <artifactId>javafx-controls</artifactId>
+            <version>${javafx.version}</version>
+        </dependency>
+
+        <!--
+          Windows 计数器（CPU、内存、电池）。系统盘不走它的文件存储枚举。
+          com.github.oshi:oshi-core:7.8.0 ，来自 Maven Central。
+        -->
+        <dependency>
+            <groupId>com.github.oshi</groupId>
+            <artifactId>oshi-core</artifactId>
+            <version>${oshi.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+            <!--
+              非模块化启动：mainClass 只写全限定类名，不要写成 module/class。
+              JDK 25 上 jSerialComm 与 JavaFX 都要原生访问，这里只加运行参数，不是 native-image 配置。
+            -->
+            <plugin>
+                <groupId>org.openjfx</groupId>
+                <artifactId>javafx-maven-plugin</artifactId>
+                <version>${javafx.maven.plugin.version}</version>
+                <configuration>
+                    <mainClass>space.firok.moli.usb.gui.MoliUsbGuiApp</mainClass>
+                    <options>
+                        <option>--enable-native-access=ALL-UNNAMED</option>
+                        <option>--enable-native-access=javafx.graphics</option>
+                    </options>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

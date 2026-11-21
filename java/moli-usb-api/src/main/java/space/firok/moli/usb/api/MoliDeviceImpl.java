@@ -171,6 +171,24 @@ final class MoliDeviceImpl implements MoliDevice {
     }
 
     @Override
+    public void setLed(int index, int red, int green, int blue) {
+        if (!capabilities.rgbLeds()) {
+            throw new UnsupportedCapabilityError("setLed", id.toString(),
+                    "设备不声明 RGB 灯能力");
+        }
+        dispatch(DisplayCodec.setLed(index, red, green, blue), "setLed");
+    }
+
+    @Override
+    public void applyLeds() {
+        if (!capabilities.rgbLeds()) {
+            throw new UnsupportedCapabilityError("applyLeds", id.toString(),
+                    "设备不声明 RGB 灯能力");
+        }
+        dispatch(DisplayCodec.applyLeds(), "applyLeds");
+    }
+
+    @Override
     public void fillRect(Rect rect, Rgb565 color) {
         Objects.requireNonNull(rect, "rect");
         Objects.requireNonNull(color, "color");
@@ -324,6 +342,16 @@ final class MoliDeviceImpl implements MoliDevice {
         }
         return InputPoller.start(session, id.toString(), listener,
                 AdcKeyDetector.fromIdleLevel(MINI_KEY_ADC_CHANNEL, measureIdleLevel()));
+    }
+
+    /**
+     * 读自描述表起始地址的一个字节。这是打开设备时已经在用的 SFR 读，不写像素、
+     * 背光、方向或灯，也不增加新的操作码。
+     */
+    @Override
+    public void probeLink() {
+        session.exchange(SfrCodec.readU8(SfrTableParser.TABLE_ADDRESS), "probeLink",
+                CancellationToken.none(), true);
     }
 
     /** MINI 按键的 ADC 通道；规范记为「旧版演示轮询通道 9」，仍需实机确认。 */

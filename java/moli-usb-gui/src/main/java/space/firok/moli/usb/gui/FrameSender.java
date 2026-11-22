@@ -7,8 +7,10 @@ import space.firok.moli.usb.api.domain.Rgb565;
 import space.firok.moli.usb.api.error.InvalidArgumentError;
 
 /**
- * 把已合成的画面交给设备。照片和桌面镜像始终未压缩；纯色优先 {@code fillRect}；
- * 文本、时钟和系统状态走两色 RLE，最坏情况超过上界时回退到 {@code streamImage}。
+ * 把已合成的画面交给设备。照片和桌面镜像按 profile 选择压缩：MINI 使用
+ * 暂存区差量，LITE/PRO 使用 {@code MSN_compaction} 的 RLE 格式。
+ * 纯色使用 {@code fillRect}。文本、时钟和系统状态走两色 RLE，最坏情况超过上界时
+ * 才回退到 {@code streamImage}。
  */
 final class FrameSender {
 
@@ -21,12 +23,14 @@ final class FrameSender {
 
     enum Kind {
         FILL,
-        UNCOMPRESSED,
+        /** 照片和桌面镜像：由设备 profile 选择压缩格式。 */
+        COMPRESSED,
         TWO_COLOR
     }
 
     enum StreamPath {
         FILL,
+        PROFILE_COMPRESSED,
         RLE,
         UNCOMPRESSED
     }
@@ -37,7 +41,7 @@ final class FrameSender {
     static Kind kindFor(ContentMode mode) {
         return switch (mode) {
             case SOLID -> Kind.FILL;
-            case IMAGE, MIRROR -> Kind.UNCOMPRESSED;
+            case IMAGE, MIRROR -> Kind.COMPRESSED;
             case STATIC_TEXT, SCROLL, CLOCK, STATS -> Kind.TWO_COLOR;
         };
     }
@@ -49,7 +53,7 @@ final class FrameSender {
     static StreamPath plan(ContentMode mode, int pixelCount) {
         return switch (kindFor(mode)) {
             case FILL -> StreamPath.FILL;
-            case UNCOMPRESSED -> StreamPath.UNCOMPRESSED;
+            case COMPRESSED -> StreamPath.PROFILE_COMPRESSED;
             case TWO_COLOR -> rleFits(pixelCount) ? StreamPath.RLE : StreamPath.UNCOMPRESSED;
         };
     }
@@ -66,6 +70,7 @@ final class FrameSender {
         switch (planned) {
             case FILL -> device.fillRect(rect, new Rgb565(frame.fillColor()));
             case UNCOMPRESSED -> device.streamImage(rect, frame.pixels());
+            case PROFILE_COMPRESSED -> device.streamImageCompact(rect, frame.pixels());
             case RLE -> {
                 try {
                     device.streamImageRle(rect, frame.pixels(), RLE_MAX_FRAMES);

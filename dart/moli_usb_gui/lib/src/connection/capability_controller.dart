@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:space_firok_moli_usb_protocol/space_firok_moli_usb_protocol.dart';
 
-import '../content/link_loss.dart';
 import 'connection_controller.dart';
 
 /// Why orientation cannot be changed, or null when the user may pick one.
@@ -141,7 +140,8 @@ final class CapabilityController extends ChangeNotifier {
   }
 
   /// One idle tick. Skips when content, a capability command, or the queue
-  /// is already busy, so a probe is never queued behind real work.
+  /// is already busy. Drops bytes already received and does not write
+  /// `00 30 00 01 00 00`.
   Future<void> probeIfIdle() async {
     if (_disposed || _connection.phase != ConnectionPhase.connected) return;
     if (_commandsInFlight > 0 || _contentSending() || _connection.queueBusy) {
@@ -149,7 +149,7 @@ final class CapabilityController extends ChangeNotifier {
     }
     final token = _token;
     final pending = _connection.trySubmit(
-      (device) => device.probeLink(token: token),
+      (device) => device.discardPending(token: token),
     );
     if (pending == null) return;
     _commandsInFlight++;
@@ -242,26 +242,6 @@ final class CapabilityController extends ChangeNotifier {
     if (error.kind == MoliErrorKind.cancelled || _token.isCancelled) return;
     if (_connection.phase != ConnectionPhase.connected) return;
     _connection.appendLog('${error.kind.label}: ${error.message}');
-    if (!_linkGone(error)) return;
-    _cancelInput();
-    _stopProbeTimer();
-    try {
-      if (_connection.phase == ConnectionPhase.connected ||
-          _connection.phase == ConnectionPhase.connecting) {
-        await _connection.disconnect();
-      }
-    } catch (closeError) {
-      if (!_disposed) _connection.appendLog('断开失败: $closeError');
-    }
-  }
-
-  bool _linkGone(MoliException error) {
-    final session = _connection.session;
-    return shouldCloseForLinkLoss(
-      error,
-      portClosed: session == null || session.port.isClosed,
-      sessionConnected: session != null && session.isConnected,
-    );
   }
 
   void _onConnection() {
@@ -299,15 +279,18 @@ final class CapabilityController extends ChangeNotifier {
 
   void _ensureInput() {
     if (_inputSub != null || !_connection.hasKeyInput) return;
+    final session = _connection.session;
     final events = _connection.keyEvents;
-    if (events == null) return;
+    if (events == null || session == null) return;
     _inputSub = events.listen(
       (event) {
         keyLabel = event.isPressed ? '按下' : '释放';
         _notify();
       },
       onError: (Object error, StackTrace _) {
-        if (error is MoliException) unawaited(_handle(error));
+        if (error is MoliException) {
+          _connection.reportInputFailure(session, error);
+        }
       },
     );
   }

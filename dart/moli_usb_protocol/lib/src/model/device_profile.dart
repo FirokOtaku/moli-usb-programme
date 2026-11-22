@@ -97,13 +97,12 @@ final class DeviceProfile {
 
   /// MINI: smallest panel, one key.
   ///
-  /// Panel size is a P0 verification item (`spec/verification.md`), so the
-  /// value below is a placeholder that the caller must confirm; the session
-  /// prefers whatever `Lcd_X` / `Lcd_Y` report.
+  /// MINI panel is 160×80 when the self-description table is absent.
+  /// A present `Lcd_X` / `Lcd_Y` still wins.
   static final DeviceProfile mini = DeviceProfile._(
     name: nameMini,
     serial: legacySerial,
-    display: const DisplayGeometry(width: 64, height: 64),
+    display: const DisplayGeometry(width: 160, height: 80, orientations: [0]),
     storage: p25d80Geometry,
     capabilities: const DeviceCapabilities(
       externalFlash: true,
@@ -118,7 +117,7 @@ final class DeviceProfile {
   static final DeviceProfile lite = DeviceProfile._(
     name: nameLite,
     serial: highSpeedSerial,
-    display: const DisplayGeometry(width: 160, height: 80),
+    display: const DisplayGeometry(width: 160, height: 80, orientations: [0, 1]),
     storage: p25d80Geometry,
     capabilities: const DeviceCapabilities(
       externalFlash: true,
@@ -127,11 +126,15 @@ final class DeviceProfile {
     colorPageEncoding: FlashColorPageEncoding.liteU16,
   );
 
-  /// PRO V1.0: color panel, NAND, backlight, 24-bit color page addressing.
+  /// PRO V1.0: 2.8 inch panel, NAND, backlight, 24-bit color page addressing.
+  ///
+  /// The demo initializes `LCD_X`/`LCD_Y` to 160×80 and then overwrites them
+  /// from `Read_MSN_Data`. Paint paths use 320×172. A missing table must fall
+  /// back to that size, not the 160×80 placeholder.
   static final DeviceProfile pro = DeviceProfile._(
     name: namePro,
     serial: highSpeedSerial,
-    display: const DisplayGeometry(width: 160, height: 80),
+    display: const DisplayGeometry(width: 320, height: 172, orientations: [0, 1]),
     storage: p25d80Geometry,
     capabilities: const DeviceCapabilities(
       externalFlash: true,

@@ -3,6 +3,7 @@ package space.firok.moli.usb.gui;
 import space.firok.moli.usb.api.MoliDevice;
 import space.firok.moli.usb.api.domain.DeviceCandidate;
 import space.firok.moli.usb.api.domain.DeviceProfile;
+import space.firok.moli.usb.api.session.CancellationToken;
 
 import java.util.List;
 
@@ -25,4 +26,11 @@ public interface DeviceSessionGateway {
      * {@code open}。不得在 JavaFX 线程调用。</p>
      */
     MoliDevice open(DeviceCandidate candidate, DeviceProfile profile);
+
+    /** 可取消的连接入口；旧测试网关可继续实现无 token 版本。 */
+    default MoliDevice open(DeviceCandidate candidate, DeviceProfile profile,
+                            CancellationToken token) {
+        token.throwIfCancelled("open", candidate.id().toString());
+        return open(candidate, profile);
+    }
 }

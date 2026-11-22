@@ -316,7 +316,7 @@ final class _WebSerialPort implements TransportPort {
             writeTimeout ?? const Duration(seconds: 2),
           );
     } on TimeoutException {
-      throw const MoliException.timeout('写入超时', operation: 'write');
+      throw const MoliException.disconnected('Web Serial 写入超时，无法确定已发送字节数', operation: 'write');
     } catch (error) {
       if (error is MoliException) rethrow;
       throw _mapWeb(error, operation: 'write');

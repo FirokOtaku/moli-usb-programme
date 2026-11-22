@@ -122,7 +122,7 @@ void main() {
     expect(connection.phase, ConnectionPhase.connected);
   });
 
-  test('content send in flight skips the probe, idle probe reads one SFR', () async {
+  test('content send in flight skips the drain, idle drain writes nothing', () async {
     final provider = FakeHostProvider();
     final connection = _connection(provider);
     addTearDown(connection.dispose);
@@ -147,8 +147,11 @@ void main() {
     await controls.probeIfIdle();
 
     expect(connection.submittedActions, blockedCalls + 1);
-    expect(port.writes.length, blockedWrites + 1);
-    expect(toHex(port.writes.last), '003000010000');
+    expect(port.writes.length, blockedWrites);
+    expect(
+      _added(port, blockedWrites).map(toHex),
+      isNot(contains('003000010000')),
+    );
   });
 
   test('RGB apply stages every lamp and applies once', () async {
@@ -228,7 +231,7 @@ void main() {
     expect(connection.dropdownsEnabled, isTrue);
   });
 
-  test('probe link loss closes the session and unlocks dropdowns', () async {
+  test('idle drain does not write, and a dead port still closes', () async {
     final provider = FakeHostProvider();
     final connection = _connection(provider);
     addTearDown(connection.dispose);
@@ -238,13 +241,15 @@ void main() {
       profileName: DeviceProfile.nameGeneric,
     );
     addTearDown(controls.dispose);
-    provider.lastPort!.failWrite = const MoliException.disconnected(
+    final before = provider.lastPort!.writes.length;
+    provider.lastPort!.failReadAvailable = const MoliException.disconnected(
       'fake link lost',
-      operation: 'fake.write',
+      operation: 'fake.read',
     );
 
     await controls.probeIfIdle();
 
+    expect(provider.lastPort!.writes.length, before);
     expect(connection.phase, ConnectionPhase.disconnected);
     expect(connection.dropdownsEnabled, isTrue);
     expect(connection.controlsLocked, isFalse);

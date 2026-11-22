@@ -64,6 +64,38 @@ class ConnectionControllerTest {
     }
 
     @Test
+    @DisplayName("界面日志在记录时加时间、保留最近 200 条，清空不关闭连接")
+    void clearLogLeavesConnectionIntact() throws Exception {
+        gateway = new FakeGateway();
+        controller = controller(Duration.ofHours(1));
+        DeviceCandidate selected = candidate("UID-1", "COM3");
+        gateway.candidates.add(selected);
+        controller.selectCandidate(selected);
+        controller.connect();
+        awaitIdle();
+
+        for (int i = 0; i <= 200; i++) {
+            controller.appendLog("entry " + i);
+        }
+        ConnectionSnapshot before = controller.snapshot();
+        assertEquals(200, before.logLines().size());
+        assertTrue(before.logLines().getFirst().matches("\\d{2}:\\d{2}:\\d{2} entry 1"));
+        assertTrue(before.logLines().getLast().matches("\\d{2}:\\d{2}:\\d{2} entry 200"));
+        assertEquals(before.logLines(), controller.snapshot().logLines());
+
+        controller.clearLog();
+        ConnectionSnapshot after = controller.snapshot();
+        assertTrue(after.logLines().isEmpty());
+        assertEquals(SessionState.CONNECTED, after.state());
+        assertEquals(before.statusText(), after.statusText());
+        assertSame(selected, after.selected());
+        assertEquals(0, gateway.closeCount.get());
+        controller.appendLog("after clear");
+        assertEquals(1, controller.snapshot().logLines().size());
+        assertTrue(controller.snapshot().logLines().getFirst().endsWith(" after clear"));
+    }
+
+    @Test
     @DisplayName("连接成功后锁定选择，断开后解锁")
     void lockAfterConnectAndUnlockAfterDisconnect() throws Exception {
         gateway = new FakeGateway();
@@ -135,6 +167,10 @@ class ConnectionControllerTest {
         assertTrue(snapshot.statusText().contains("握手失败"));
         assertTrue(snapshot.logLines().stream().anyMatch(line -> line.contains("握手失败")));
         assertEquals(0, gateway.closeCount.get(), "open 失败时控制器没有设备可关");
+        gateway.failure = null;
+        controller.connect();
+        awaitIdle();
+        assertEquals(SessionState.CONNECTED, controller.snapshot().state());
     }
 
     @Test
@@ -238,6 +274,8 @@ class ConnectionControllerTest {
         assertEquals("已连接 PRO-1 320x172", pro.statusText());
         assertTrue(pro.warning().contains("320x172"));
         assertTrue(pro.warning().contains("PRO"));
+        assertTrue(pro.warning().contains("没有给出"));
+        assertFalse(pro.warning().contains("设备报告的屏幕尺寸"));
         assertFalse(pro.statusText().contains("64x64"));
         controller.disconnect();
         awaitIdle();
@@ -345,11 +383,36 @@ class ConnectionControllerTest {
         assertEquals(SessionState.DISCONNECTED, snapshot.state());
         assertFalse(snapshot.combosLocked(), "断链后必须解锁设备和 profile");
         assertTrue(snapshot.connectEnabled());
-        assertFalse(snapshot.disconnectEnabled());
+        assertTrue(snapshot.disconnectEnabled(), "等待重连时仍可显式断开");
         assertTrue(snapshot.statusText().contains("连接已断开"));
         assertFalse(snapshot.statusText().startsWith("参数无效"), "不能按消息文本把断链当成参数错误");
         assertEquals(1, gateway.closeCount.get());
         assertTrue(snapshot.logLines().stream().anyMatch(line -> line.contains("连接已断开")));
+    }
+
+    @Test
+    void reconnectsSameCandidateAfterInvoluntaryLoss() throws Exception {
+        gateway = new FakeGateway();
+        var target = candidate("UID-1", "COM3");
+        gateway.candidates.add(target);
+        controller = controller(Duration.ofHours(1));
+        controller.selectCandidate(target);
+        controller.selectProfile(DeviceProfile.mini());
+        controller.connect();
+        awaitIdle();
+        CountDownLatch reconnected = new CountDownLatch(1);
+        controller.setListener(snapshot -> {
+            if (snapshot.state() == SessionState.CONNECTED && gateway.openCount.get() == 2) {
+                reconnected.countDown();
+            }
+        });
+        assertTrue(controller.submitDevice(device -> {
+            throw new DisconnectedError("streamImage", "COM3", "写入失败");
+        }));
+        awaitIdle();
+        assertEquals(1, gateway.openCount.get());
+        assertTrue(reconnected.await(3, TimeUnit.SECONDS));
+        assertEquals(DeviceProfile.MINI, controller.snapshot().profileName());
     }
 
     @Test
@@ -427,7 +490,7 @@ class ConnectionControllerTest {
     }
 
     @Test
-    @DisplayName("发送进行中跳过探活，不把 probeLink 排进 worker")
+    @DisplayName("发送进行中跳过排空；空闲排空不调用 probeLink")
     void probeTickSkippedWhileSendInFlight() throws Exception {
         gateway = new FakeGateway();
         controller = controller(Duration.ofHours(1));
@@ -446,31 +509,41 @@ class ConnectionControllerTest {
             }
         }));
         assertTrue(entered.await(2, TimeUnit.SECONDS));
-        assertFalse(controller.probeTick(), "发送进行中不得把探活排进 worker");
+        assertFalse(controller.probeTick(), "发送进行中不得把排空排进 worker");
+        assertEquals(0, gateway.drainCount.get());
         assertEquals(0, gateway.probeCount.get());
 
         release.countDown();
         awaitIdle();
         controller.markContentSendInFlight(true);
         assertFalse(controller.probeTick(), "内容发送尚未结束时也要跳过");
+        assertEquals(0, gateway.drainCount.get());
         assertEquals(0, gateway.probeCount.get());
 
         controller.markContentSendInFlight(false);
         assertTrue(controller.probeTick());
         awaitIdle();
-        assertEquals(1, gateway.probeCount.get());
+        assertEquals(1, gateway.drainCount.get());
+        assertEquals(0, gateway.probeCount.get(), "空闲不得发送 00 30 00 01 00 00");
     }
 
     @Test
-    @DisplayName("探活断链按类型关闭会话并解锁，不看消息文本")
+    @DisplayName("空闲排空超时不断开；传输断开才关闭会话")
     void probeLinkLossUsesExistingPath() throws Exception {
         gateway = new FakeGateway();
-        gateway.probeError.set(new ProtocolDesynchronizedError("probeLink", "COM3", "参数无效"));
+        gateway.drainError.set(new TimeoutError("discardPending", "COM3", "在 800 ms 内未收到响应"));
         controller = controller(Duration.ofHours(1));
         controller.selectCandidate(candidate("UID-1", "COM3"));
         controller.connect();
         awaitIdle();
 
+        assertTrue(controller.probeTick());
+        awaitIdle();
+        assertEquals(SessionState.CONNECTED, controller.snapshot().state());
+        assertEquals(0, gateway.closeCount.get());
+        assertEquals(0, gateway.probeCount.get());
+
+        gateway.drainError.set(new ProtocolDesynchronizedError("discardPending", "COM3", "参数无效"));
         assertTrue(controller.probeTick());
         awaitIdle();
 
@@ -530,6 +603,8 @@ class ConnectionControllerTest {
         volatile List<DisplayGeometry.Orientation> orientations = List.of();
         final AtomicInteger probeCount = new AtomicInteger();
         final AtomicReference<MoliUsbException> probeError = new AtomicReference<>();
+        final AtomicInteger drainCount = new AtomicInteger();
+        final AtomicReference<MoliUsbException> drainError = new AtomicReference<>();
         final CountDownLatch entered = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
         volatile boolean blockOpen;
@@ -563,7 +638,7 @@ class ConnectionControllerTest {
                 throw failure;
             }
             return new FakeDevice(candidate, profile.name(), width, height, closeCount,
-                    capabilities, List.copyOf(orientations), probeCount, probeError);
+                    capabilities, List.copyOf(orientations), probeCount, probeError, drainCount, drainError);
         }
 
         void release() {
@@ -587,11 +662,14 @@ class ConnectionControllerTest {
         private final List<DisplayGeometry.Orientation> orientations;
         private final AtomicInteger probeCount;
         private final AtomicReference<MoliUsbException> probeError;
+        private final AtomicInteger drainCount;
+        private final AtomicReference<MoliUsbException> drainError;
         private boolean closed;
 
         private FakeDevice(DeviceId id, String profileName, int width, int height, AtomicInteger closeCount,
                            DeviceCapabilities capabilities, List<DisplayGeometry.Orientation> orientations,
-                           AtomicInteger probeCount, AtomicReference<MoliUsbException> probeError) {
+                           AtomicInteger probeCount, AtomicReference<MoliUsbException> probeError,
+                           AtomicInteger drainCount, AtomicReference<MoliUsbException> drainError) {
             this.id = id;
             this.profileName = profileName;
             this.width = width;
@@ -601,14 +679,17 @@ class ConnectionControllerTest {
             this.orientations = orientations;
             this.probeCount = probeCount;
             this.probeError = probeError;
+            this.drainCount = drainCount;
+            this.drainError = drainError;
         }
 
         private FakeDevice(DeviceCandidate candidate, String profileName, int width, int height,
                            AtomicInteger closeCount, DeviceCapabilities capabilities,
                            List<DisplayGeometry.Orientation> orientations, AtomicInteger probeCount,
-                           AtomicReference<MoliUsbException> probeError) {
+                           AtomicReference<MoliUsbException> probeError, AtomicInteger drainCount,
+                           AtomicReference<MoliUsbException> drainError) {
             this(candidate.id(), profileName, width, height, closeCount, capabilities, orientations,
-                    probeCount, probeError);
+                    probeCount, probeError, drainCount, drainError);
         }
 
         @Override
@@ -669,6 +750,15 @@ class ConnectionControllerTest {
         public void probeLink() {
             probeCount.incrementAndGet();
             MoliUsbException error = probeError.get();
+            if (error != null) {
+                throw error;
+            }
+        }
+
+        @Override
+        public void discardPending() {
+            drainCount.incrementAndGet();
+            MoliUsbException error = drainError.get();
             if (error != null) {
                 throw error;
             }

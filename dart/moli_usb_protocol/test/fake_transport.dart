@@ -60,8 +60,27 @@ final class FakeMsu2Port implements TransportPort {
   /// Extra latency before a response becomes readable.
   Duration responseDelay = Duration.zero;
 
-  /// Overrides the whole 6-byte response body (used to test desync detection).
+  /// Overrides the whole response body (used to test desync detection).
+  ///
+  /// May be longer than 6 bytes. A 7-byte or 11-byte body is a 6-byte echo
+  /// plus a `\0MSNxx` banner prefix, which is what a live MINI returned.
   List<int>? forcedResponse;
+
+  /// Appended after every ordinary command echo. Empty by default.
+  List<int> echoTail = const [];
+
+  /// u8 SFR values keyed by address. Used when the session reads the
+  /// self-description table and then `Lcd_X` / `Lcd_Y`.
+  final Map<int, int> sfrU8 = <int, int>{};
+
+  /// u16 SFR values keyed by the 8-bit address (`00 30 20 addr 00 00`).
+  ///
+  /// MINI firmware V1.2 stores `Lcd_X` at address 0. Address 0 must be readable.
+  final Map<int, int> sfrU16 = <int, int>{};
+
+  /// When true, a banner prefix in [echoTail] is completed a few milliseconds
+  /// later, the way the rest of an in-flight `\0MSNxx` arrives on the wire.
+  bool completeBannerTail = false;
 
   bool _isClosed = false;
 
@@ -177,6 +196,11 @@ final class FakeMsu2Port implements TransportPort {
   /// Raw pending bytes, for assertions.
   List<int> get pendingBytes => List.unmodifiable(_pending);
 
+  /// Pushes bytes the device has already transmitted but the host has not read.
+  void inject(List<int> bytes) {
+    _pending.addAll(bytes);
+  }
+
   void _handleWrite(Uint8List frame) {
     if (frame.length != kFrameLength) return;
 
@@ -185,21 +209,52 @@ final class FakeMsu2Port implements TransportPort {
       return;
     }
     if (!autoRespond) return;
+    // Write_LCD_Screen_fast1 / show_PC_Screen do not read these. Echoing them
+    // would hide a host that still waits out the command timeout.
+    if (_isUnackedStream(frame)) return;
 
     final override = forcedResponse;
     if (override != null) {
       _enqueue(override);
       return;
     }
-    final byte4 = responseByte4 ?? 0;
+    var byte4 = responseByte4 ?? 0;
+    var byte5 = responseByte5;
+    if (frame[0] == 0x00 && frame[1] == 0x30 && frame[2] == 0x00) {
+      final address = (frame[3] << 8) | frame[4];
+      byte5 = sfrU8[address] ?? byte5;
+    }
+    if (frame[0] == 0x00 && frame[1] == 0x30 && frame[2] == 0x20) {
+      final value = sfrU16[frame[3]];
+      if (value != null) {
+        byte4 = (value >> 8) & 0xFF;
+        byte5 = value & 0xFF;
+      }
+    }
     _enqueue(<int>[
       frame[0],
       frame[1],
-      0,
+      frame[0] == 2 && frame[1] == 3 ? frame[2] : 0,
       0,
       byte4,
-      responseByte5,
+      byte5,
+      ...echoTail,
     ]);
+    _maybeCompleteBanner(echoTail);
+  }
+
+  void _maybeCompleteBanner(List<int> tail) {
+    if (!completeBannerTail || tail.isEmpty || tail.length >= 6) return;
+    const prefix = [0x00, 0x4D, 0x53, 0x4E];
+    final limit = tail.length < prefix.length ? tail.length : prefix.length;
+    for (var i = 0; i < limit; i++) {
+      if (tail[i] != prefix[i]) return;
+    }
+    if (tail.length >= 5 && (tail[4] < 0x30 || tail[4] > 0x39)) return;
+    final rest = defaultBanner.sublist(tail.length);
+    unawaited(Future<void>.delayed(const Duration(milliseconds: 5), () {
+      if (!disconnected) _pending.addAll(rest);
+    }));
   }
 
   void _enqueue(List<int> bytes) {
@@ -210,6 +265,13 @@ final class FakeMsu2Port implements TransportPort {
     unawaited(Future<void>.delayed(responseDelay, () {
       if (!disconnected) _pending.addAll(bytes);
     }));
+  }
+
+  static bool _isUnackedStream(List<int> frame) {
+    if (frame[0] == 0x04 || frame[0] == 0x09) return true;
+    return frame[0] == 0x02 &&
+        frame[1] == 0x03 &&
+        (frame[2] == 0x08 || frame[2] == 0x09);
   }
 
   static bool _isChallenge(List<int> frame) {

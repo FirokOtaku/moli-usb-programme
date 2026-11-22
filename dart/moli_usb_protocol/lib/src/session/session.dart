@@ -68,6 +68,24 @@ final class MoliSession {
 
   final SerialQueue _queue = SerialQueue();
 
+  /// Bytes already pulled from the port but not yet consumed as a frame.
+  ///
+  /// A live device keeps broadcasting `\0MSNxx` after the handshake. One read
+  /// can therefore return a 6-byte echo plus a banner prefix (7 or 11 bytes
+  /// on the MINI that failed to connect). The prefix stays here until the
+  /// next command drains it; it is never glued onto the current frame.
+  final List<int> _inbox = <int>[];
+
+  /// How long [setXy]/[setSize]/[setColors] wait for an ack. Vendor code only
+  /// writes those frames. Waiting a full command timeout lets a banner pile
+  /// up and aborts the fill that would otherwise follow.
+  static const Duration _displaySetupAck = Duration(milliseconds: 50);
+
+  /// How long to wait for the rest of a banner prefix before the next write.
+  static const Duration _bannerPrefixDrain = Duration(milliseconds: 40);
+  // A live device broadcasts banners continuously; never chase that stream forever.
+  static const int _maxImmediateReads = 32;
+
   DeviceInfo? _info;
   bool _connected = false;
   bool _closing = false;
@@ -136,16 +154,51 @@ final class MoliSession {
       _deviceId = info.id;
       _info = info;
 
+      if (_profile.name == DeviceProfile.namePro) {
+        final orientation = _display.setOrientation(0);
+        try {
+          _requireAction(orientation, await request(orientation, token: token));
+        } catch (_) {
+          _connected = false;
+          rethrow;
+        }
+      }
       if (_options.readSelfDescription) {
         try {
           info = await _applySelfDescription(info, token: token);
           _info = info;
-        } catch (error) {
-          // The link stays usable; only the richer facts are missing.
-          if (!_options.tolerateSelfDescriptionFailure) rethrow;
+        } on MoliException catch (error) {
+          if (!_options.tolerateSelfDescriptionFailure ||
+              error.kind == MoliErrorKind.disconnected ||
+              error.kind == MoliErrorKind.cancelled) rethrow;
         }
       }
+      token?.ensureNotCancelled(operation: 'connect');
       return _info!;
+    });
+  }
+
+  /// Drops bytes the device has already sent. Does not write.
+  ///
+  /// Official demos do not poll SFR `0x0100` while idle. Banners still arrive
+  /// about every 100 ms, so the host has to read them or the driver buffer
+  /// overruns. A banner prefix is left in place for the next command.
+  Future<void> discardPending({CancelToken? token}) {
+    return _guard('discardPending', () async {
+      if (!_connected) {
+        throw MoliException.disconnected(
+          'session is not connected',
+          operation: 'discardPending',
+        );
+      }
+      return _queue.run(() async {
+        token?.ensureNotCancelled(operation: 'discardPending');
+        await _pullImmediate(token: token);
+        _skipCompleteBanners();
+        if (_inbox.isNotEmpty && !_inboxIsBannerPrefix()) {
+          _inbox.clear();
+        }
+      });
     });
   }
 
@@ -184,24 +237,13 @@ final class MoliSession {
       }
       return _queue.run(() async {
         token?.ensureNotCancelled(operation: 'request');
-        await _port.write(
-          frame.bytes,
-          writeTimeout: _options.writeTimeout,
-          token: token,
-        );
-        final response = await _readFrame(
+        final response = await _exchange(
+          frame,
           timeout ?? _options.operationTimeout,
           token: token,
         );
         if (expectEcho ?? _options.strictEcho) {
-          if (response.command != frame.command ||
-              response.subcommand != frame.subcommand) {
-            throw MoliException.protocolDesynchronized(
-              'response ${toHex(response.bytes)} does not echo request '
-              '${toHex(frame.bytes)}',
-              operation: 'request',
-            );
-          }
+          _requireEcho(frame, response);
         }
         return response;
       });
@@ -225,7 +267,7 @@ final class MoliSession {
   /// Sets the drawing origin for subsequent display commands.
   Future<void> setOrigin(int x, int y, {CancelToken? token}) async {
     _requireDisplay(token);
-    await request(_display.setXy(x, y), token: token);
+    await _dispatchSetup(_display.setXy(x, y), token: token);
   }
 
   /// Sets the region size for subsequent display commands.
@@ -235,7 +277,7 @@ final class MoliSession {
     CancelToken? token,
   }) async {
     _requireDisplay(token);
-    await request(_display.setSize(width, height), token: token);
+    await _dispatchSetup(_display.setSize(width, height), token: token);
   }
 
   /// Sets the active region (origin + size) after bounds-checking it.
@@ -243,8 +285,8 @@ final class MoliSession {
     _requireDisplay(token);
     final geometry = displayGeometry;
     rect.ensureWithin(geometry.width, geometry.height, operation: 'setRegion');
-    await request(_display.setXy(rect.x, rect.y), token: token);
-    await request(_display.setSize(rect.width, rect.height), token: token);
+    await _dispatchSetup(_display.setXy(rect.x, rect.y), token: token);
+    await _dispatchSetup(_display.setSize(rect.width, rect.height), token: token);
   }
 
   /// Sets the foreground/background colors used by text and mono operations.
@@ -254,7 +296,7 @@ final class MoliSession {
     CancelToken? token,
   }) async {
     _requireDisplay(token);
-    await request(_display.setColors(foreground, background), token: token);
+    await _dispatchSetup(_display.setColors(foreground, background), token: token);
   }
 
   /// Fills the current region with [color].
@@ -325,12 +367,16 @@ final class MoliSession {
 
   /// Streams [pixels] (RGB565, one entry per pixel) into the region [rect].
   ///
-  /// This is the uncompressed path: action `0x07`, staged `0x04` frames,
-  /// action `0x08` per 256-byte batch, action `0x09` at the end.
+  /// Uncompressed path from `Write_LCD_Screen_fast1`: setXy/setSize, action
+  /// `0x07` (best-effort ack), then one write of the `0x04` / `0x08` / `0x09`
+  /// frames. Those data frames are not read. Waiting for each `0x08` makes
+  /// the panel scan in 256-byte bands and the following idle probe
+  /// (`00 30 00 01 00 00`) time out.
   Future<void> drawPixels(
     Rect rect,
     List<Rgb565Color> pixels, {
     CancelToken? token,
+    bool miniCompact = false,
   }) async {
     _requireDisplay(token);
     rect.ensureWithin(displayGeometry.width, displayGeometry.height,
@@ -343,11 +389,29 @@ final class MoliSession {
         deviceId: deviceId?.value,
       );
     }
-    await setRegion(rect, token: token);
     final encoder = PixelStreamEncoder(_display, _scratch);
-    for (final frame in encoder.encodeStream(pixels.toWireBytes())) {
-      await request(frame, token: token);
+    final bytes = pixels.toWireBytes();
+    final frames = miniCompact ? encoder.encodeMiniCompactStream(bytes) : encoder.encodeStream(bytes);
+    await _displayTransaction(rect, frames.first, frames.sublist(1),
+        token: token, operation: 'drawPixels');
+  }
+
+  /// Two-color path from `show_PC_Screen`: `LCD_ADD` (including action `0x07`),
+  /// then command `0x09` RLE frames in one write. No action `0x08`, and no
+  /// trailing action `0x09`.
+  Future<void> drawPixelsRle(
+    Rect rect,
+    List<int> rgb565Pixels, {
+    CancelToken? token,
+  }) async {
+    _requireDisplay(token);
+    rect.ensureWithin(displayGeometry.width, displayGeometry.height,
+        operation: 'drawPixelsRle');
+    if (rgb565Pixels.length != rect.width * rect.height) {
+      throw const MoliException.invalidArgument('pixel count does not match region', operation: 'drawPixelsRle');
     }
+    await _displayTransaction(rect, _display.beginStream(), RleCodec.encode(rgb565Pixels),
+        token: token, operation: 'drawPixelsRle');
   }
 
   // ------------------------------------------------------------------ SFR API
@@ -462,6 +526,9 @@ final class MoliSession {
         SfrTableParser.tableAddress + i,
         token: token,
       );
+      // A leading 0 is end-of-table. PRO answers 0x0100 with 0x00 and has no
+      // entries; reading the remaining 255 addresses only stalls the link.
+      if (i == 0 && table[0] == 0) break;
     }
     return const SfrTableParser().parse(table);
   }
@@ -483,7 +550,8 @@ final class MoliSession {
       try {
         final uid = await readSfrU8(uidEntry.address, token: token);
         id = DeviceId('uid:${uid.toRadixString(16).padLeft(2, '0')}');
-      } catch (_) {
+      } on MoliException catch (error) {
+        if (error.kind == MoliErrorKind.disconnected || error.kind == MoliErrorKind.cancelled) rethrow;
         // Keep the transport-derived id.
       }
     }
@@ -521,7 +589,9 @@ final class MoliSession {
     SfrTableEntry? entry, {
     CancelToken? token,
   }) async {
-    if (entry == null || entry.address == 0) return null;
+    // Address 0 is legal. MINI firmware V1.2 puts Lcd_X at u16 SFR 0x00;
+    // treating 0 as "missing" drops the width and leaves height at 0.
+    if (entry == null) return null;
     try {
       if (entry.family == SfrEntryFamily.u16Register) {
         return await readSfrU16(entry.address, token: token);
@@ -529,7 +599,8 @@ final class MoliSession {
       if (entry.family == SfrEntryFamily.u8Register) {
         return await readSfrU8(entry.address, token: token);
       }
-    } catch (_) {
+    } on MoliException catch (error) {
+      if (error.kind == MoliErrorKind.disconnected || error.kind == MoliErrorKind.cancelled) rethrow;
       return null;
     }
     return null;
@@ -570,7 +641,7 @@ final class MoliSession {
     final detector = _keyDetector;
     final controller = _inputController;
     if (detector == null || controller == null || controller.isClosed) return;
-    if (!_connected) return;
+    if (!_connected || _queue.isBusy) return;
     try {
       final sample = await readAdc(detector.channel);
       final state = detector.feed(sample);
@@ -659,18 +730,272 @@ final class MoliSession {
     }
   }
 
-  /// Reads exactly one frame from the port.
+  /// Writes [frame] and returns its 6-byte response.
   ///
-  /// Must be called from inside the serialized queue (or during the handshake,
-  /// before any transaction is running).
-  Future<Frame> _readFrame(Duration timeout, {CancelToken? token}) async {
-    token?.ensureNotCancelled(operation: 'read');
-    final bytes = await _port.readExact(
-      kFrameLength,
-      overallTimeout: timeout,
+  /// Must run inside the serial queue. A banner prefix already in [_inbox] is
+  /// finished and skipped before the write, so the response cannot be glued
+  /// onto the previous banner.
+  Future<Frame> _exchange(
+    Frame frame,
+    Duration timeout, {
+    CancelToken? token,
+  }) async {
+    await _prepareInbox(token: token);
+    await _port.write(
+      frame.bytes,
+      writeTimeout: _options.writeTimeout,
       token: token,
     );
+    final bytes = await _readCommandFrame(timeout, token: token);
     return Frame.fromBytes(bytes);
+  }
+
+  void _requireAction(Frame request, Frame response) {
+    _requireEcho(request, response);
+    if (request.bytes[2] != response.bytes[2]) {
+      throw MoliException.protocolDesynchronized(
+        'display reply did not confirm action ${request.bytes[2]}',
+        operation: 'displayAction',
+      );
+    }
+  }
+
+  Future<void> fillRect(Rect rect, Rgb565Color color, {CancelToken? token}) {
+    _requireDisplay(token);
+    rect.ensureWithin(displayGeometry.width, displayGeometry.height,
+        operation: 'fillRect');
+    return _displayTransaction(rect, _display.fillCurrent(color), const [],
+        token: token, operation: 'fillRect');
+  }
+
+  // ADC polling and other API calls cannot enter between LCD_ADD and its
+  // payload. Once action 07 is on the wire, finish this frame or lose the link;
+  // a UI mode change must not leave firmware expecting a missing payload.
+  Future<void> _displayTransaction(Rect rect, Frame action, List<Frame> data,
+      {required String operation, CancelToken? token}) {
+    return _guard(operation, () => _queue.run(() async {
+      if (!_connected) {
+        throw MoliException.disconnected('session is not connected', operation: operation);
+      }
+      token?.ensureNotCancelled(operation: operation);
+      final setup = [_display.setXy(rect.x, rect.y),
+        _display.setSize(rect.width, rect.height)];
+      await _prepareInbox(token: token);
+      for (final frame in setup) {
+        await _port.write(frame.bytes, writeTimeout: _options.writeTimeout);
+      }
+      await _port.write(action.bytes, writeTimeout: _options.writeTimeout);
+      try {
+        final response = Frame.fromBytes(await _readCommandFrame(
+            _options.operationTimeout, optionalSetup: setup));
+        _requireAction(action, response);
+      } on MoliException catch (error) {
+        if (data.isEmpty || error.kind == MoliErrorKind.disconnected) rethrow;
+        // The receiver might have entered pixel mode but lost the ACK. Sending
+        // another command on this stream could be interpreted as pixels.
+        throw MoliException.disconnected('未确认显示区域，不能安全发送下一条命令',
+            operation: operation, cause: error);
+      }
+      if (data.isNotEmpty) {
+        final payload = Uint8List(data.length * kFrameLength);
+        for (var i = 0; i < data.length; i++) {
+          payload.setAll(i * kFrameLength, data[i].bytes);
+        }
+        await _port.write(payload, writeTimeout: _wireWriteBudget(payload.length));
+      }
+    }));
+  }
+
+  /// 8N1 is 10 bit-times per byte. Official `ser.write` blocks until the OS
+  /// accepts the buffer; do not apply the short command write timeout here.
+  Duration _wireWriteBudget(int byteCount) {
+    final baud = _port.settings.baudRate;
+    if (baud <= 0 || byteCount <= 0) return _options.writeTimeout;
+    final millis = (byteCount * 10 * 1000 / baud).ceil() + 1000;
+    final budget = Duration(milliseconds: millis);
+    return budget > _options.writeTimeout ? budget : _options.writeTimeout;
+  }
+
+  /// Vendor write-only display setup: `setXy` / `setSize` / `setColors`.
+  ///
+  /// A matching echo is accepted. A timeout with only a banner prefix left in
+  /// the inbox is not a failure — the fill that follows must still be sent.
+  /// A non-banner tail is still a desynchronization.
+  Future<void> _dispatchSetup(Frame frame, {CancelToken? token}) {
+    return _guard('displaySetup', () async {
+      if (!_connected) {
+        throw MoliException.disconnected(
+          'session is not connected',
+          operation: 'displaySetup',
+        );
+      }
+      return _queue.run(() async {
+        token?.ensureNotCancelled(operation: 'displaySetup');
+        try {
+          final response = await _exchange(frame, _displaySetupAck, token: token);
+          if (_options.strictEcho) _requireEcho(frame, response);
+        } on MoliException catch (error) {
+          if (error.kind != MoliErrorKind.timeout) rethrow;
+          if (_inbox.isNotEmpty && !_inboxIsBannerPrefix()) {
+            final stale = Uint8List.fromList(_inbox);
+            _inbox.clear();
+            throw MoliException.protocolDesynchronized(
+              'display setup timed out with a non-banner residue '
+              '${toHex(stale)}',
+              operation: 'displaySetup',
+            );
+          }
+        }
+      });
+    });
+  }
+
+  void _requireEcho(Frame request, Frame response) {
+    if (response.command != request.command ||
+        response.subcommand != request.subcommand) {
+      throw MoliException.protocolDesynchronized(
+        'response ${toHex(response.bytes)} does not echo request '
+        '${toHex(request.bytes)}',
+        operation: 'request',
+      );
+    }
+  }
+
+  /// Collects one 6-byte command frame, leaving a banner prefix in [_inbox].
+  Future<Uint8List> _readCommandFrame(
+    Duration timeout, {
+    CancelToken? token,
+    List<Frame> optionalSetup = const [],
+  }) async {
+    void skipUnsolicited() {
+      while (true) {
+        _skipCompleteBanners();
+        if (_inbox.length < kFrameLength || !optionalSetup.any((setup) =>
+            setup.command == _inbox[0] && setup.subcommand == _inbox[1])) return;
+        _inbox.removeRange(0, kFrameLength);
+      }
+    }
+    final deadline = DateTime.now().add(timeout);
+    while (true) {
+      token?.ensureNotCancelled(operation: 'read');
+      skipUnsolicited();
+      if (_inboxIsBannerPrefix()) {
+        if (!await _readUntil(deadline, token: token)) {
+          throw _timeoutWaiting(timeout);
+        }
+        continue;
+      }
+      if (_inbox.length >= kFrameLength) {
+        final frame = Uint8List.fromList(_inbox.sublist(0, kFrameLength));
+        _inbox.removeRange(0, kFrameLength);
+        await _pullImmediate(token: token);
+        skipUnsolicited();
+        if (_inbox.isNotEmpty && !_inboxIsBannerPrefix()) {
+          final tail = Uint8List.fromList(_inbox);
+          _inbox.clear();
+          final combined = Uint8List(frame.length + tail.length);
+          combined.setAll(0, frame);
+          combined.setAll(frame.length, tail);
+          throw MoliException.protocolDesynchronized(
+            'response is ${combined.length} bytes, not a 6-byte frame plus '
+            'a \\0MSN banner prefix (${toHex(combined)})',
+            operation: 'read',
+          );
+        }
+        return frame;
+      }
+      if (!await _readUntil(deadline, token: token)) {
+        if (_inbox.isEmpty) throw _timeoutWaiting(timeout);
+        final partial = Uint8List.fromList(_inbox);
+        _inbox.clear();
+        throw MoliException.malformedResponse(
+          'response incomplete: ${partial.length} bytes, need $kFrameLength '
+          '(${toHex(partial)})',
+          operation: 'read',
+        );
+      }
+    }
+  }
+
+  /// Drops complete banners and finishes a banner prefix before the next write.
+  Future<void> _prepareInbox({CancelToken? token}) async {
+    await _pullImmediate(token: token);
+    _skipCompleteBanners();
+    if (_inboxIsBannerPrefix()) {
+      final deadline = DateTime.now().add(_bannerPrefixDrain);
+      while (_inboxIsBannerPrefix()) {
+        token?.ensureNotCancelled(operation: 'read');
+        if (!await _readUntil(deadline, token: token)) {
+          throw MoliException.protocolDesynchronized(
+            'unfinished banner prefix ${toHex(Uint8List.fromList(_inbox))} '
+            'before the next command',
+            operation: 'read',
+          );
+        }
+        _skipCompleteBanners();
+      }
+    }
+    if (_inbox.isNotEmpty) {
+      final stale = Uint8List.fromList(_inbox);
+      _inbox.clear();
+      throw MoliException.protocolDesynchronized(
+        'receive buffer held ${stale.length} bytes before send '
+        '(${toHex(stale)})',
+        operation: 'read',
+      );
+    }
+  }
+
+  void _skipCompleteBanners() {
+    while (_inbox.length >= kFrameLength) {
+      final head = Uint8List.fromList(_inbox.sublist(0, kFrameLength));
+      if (_handshake.tryParseBanner(head) == null) return;
+      _inbox.removeRange(0, kFrameLength);
+    }
+  }
+
+  bool _inboxIsBannerPrefix() {
+    final size = _inbox.length;
+    if (size <= 0 || size >= kFrameLength) return false;
+    return _handshake.isBannerPrefix(_inbox, 0, size);
+  }
+
+  Future<void> _pullImmediate({CancelToken? token}) async {
+    for (var reads = 0; reads < _maxImmediateReads; reads++) {
+      token?.ensureNotCancelled(operation: 'read');
+      final extra = await _port.readAvailable();
+      if (extra.isEmpty) return;
+      _inbox.addAll(extra);
+    }
+    // The device may keep broadcasting \0MSNxx. Leave the bounded snapshot in
+    // the inbox for normal framing instead of blocking the session forever.
+  }
+
+  /// Reads one slice. Returns false when [deadline] has passed and nothing new
+  /// arrived.
+  Future<bool> _readUntil(DateTime deadline, {CancelToken? token}) async {
+    final left = deadline.difference(DateTime.now());
+    if (left <= Duration.zero) return false;
+    final slice =
+        left < _options.readSliceTimeout ? left : _options.readSliceTimeout;
+    try {
+      final chunk = await _port.read(16, readTimeout: slice, token: token);
+      if (chunk.isEmpty) return DateTime.now().isBefore(deadline);
+      _inbox.addAll(chunk);
+      return true;
+    } on MoliException catch (error) {
+      if (error.kind == MoliErrorKind.timeout) {
+        return DateTime.now().isBefore(deadline);
+      }
+      rethrow;
+    }
+  }
+
+  MoliException _timeoutWaiting(Duration timeout) {
+    return MoliException.timeout(
+      'no response within ${timeout.inMilliseconds}ms',
+      operation: 'read',
+    );
   }
 
   /// Sends the `\0MSNCN` challenge and waits for the identical echo.

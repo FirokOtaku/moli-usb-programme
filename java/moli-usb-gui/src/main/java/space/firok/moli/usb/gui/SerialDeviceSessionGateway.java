@@ -7,6 +7,7 @@ import space.firok.moli.usb.api.domain.DeviceCandidate;
 import space.firok.moli.usb.api.domain.DeviceProfile;
 import space.firok.moli.usb.serial.SerialDeviceProvider;
 import space.firok.moli.usb.serial.SerialPortConfig;
+import space.firok.moli.usb.api.session.CancellationToken;
 
 import java.util.List;
 import java.util.Objects;
@@ -30,11 +31,18 @@ public final class SerialDeviceSessionGateway implements DeviceSessionGateway {
 
     @Override
     public MoliDevice open(DeviceCandidate candidate, DeviceProfile profile) {
+        return open(candidate, profile, CancellationToken.none());
+    }
+
+    @Override
+    public MoliDevice open(DeviceCandidate candidate, DeviceProfile profile,
+                           CancellationToken token) {
         Objects.requireNonNull(candidate, "candidate");
         Objects.requireNonNull(profile, "profile");
+        Objects.requireNonNull(token, "token");
         SerialDeviceProvider provider = providerFor(profile);
         MoliUsb api = MoliUsb.over(provider);
-        return api.open(candidate, MoliOptions.defaults().withProfile(profile));
+        return api.open(candidate, MoliOptions.defaults().withProfile(profile), token);
     }
 
     /**

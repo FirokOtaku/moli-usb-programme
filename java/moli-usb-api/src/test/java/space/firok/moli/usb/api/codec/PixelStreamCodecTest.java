@@ -29,11 +29,11 @@ class PixelStreamCodecTest {
     @DisplayName("不足 256 字节时只有一次提交，长度是真实字节数")
     void singleBatchUnderScratch() {
         List<Frame> frames = PixelStreamCodec.encodeStream(new byte[16]);
-        // 0x07 + 4 个暂存区帧（16/4）+ 0x08 + 0x09
-        assertEquals(7, frames.size());
+        // 0x07 + 64 个暂存区帧（尾批补 FF）+ 0x08 + 0x09
+        assertEquals(67, frames.size());
         assertEquals(DisplayAction.BEGIN_STREAM, frames.getFirst().data0());
-        assertEquals(DisplayAction.COMMIT_STAGED, frames.get(5).data0());
-        assertEquals(16, (frames.get(5).data1() << 8) | frames.get(5).data2());
+        assertEquals(Frame.of(4, 4, 255, 255, 255, 255), frames.get(5));
+        assertEquals(DisplayCodec.commitStaged(16), frames.get(65));
         assertEquals(DisplayAction.WAIT_TRANSFER_DONE, frames.getLast().data0());
     }
 
@@ -50,9 +50,9 @@ class PixelStreamCodecTest {
                 .filter(frame -> frame.command() == Commands.SCRATCH)
                 .mapToInt(frame -> ScratchCodec.BYTES_PER_FRAME)
                 .sum();
-        // 64 帧（256 字节）+ 11 帧（44 字节，末帧补零）
-        assertEquals(256 + 44, totalStaged);
-        assertEquals(75, frames.stream()
+        // 64 帧（256 字节）+ 64 帧（44 字节 + FF 填充）
+        assertEquals(512, totalStaged);
+        assertEquals(128, frames.stream()
                 .filter(frame -> frame.command() == Commands.SCRATCH).count());
     }
 
@@ -79,13 +79,24 @@ class PixelStreamCodecTest {
     }
 
     @Test
-    @DisplayName("RLE 路径也是 0x07 → RLE 帧 → 0x09，没有 0x08")
+    void miniCompactSendsDefaultWordAndOnlyDifferingWords() {
+        int[] pixels = new int[128];
+        java.util.Arrays.fill(pixels, 0x07E0);
+        pixels[0] = 0;
+        var frames = PixelStreamCodec.encodeMiniCompactStream(pixels);
+        assertEquals(List.of(DisplayCodec.beginStream(),
+                Frame.of(2, 4, 7, 224, 7, 224),
+                Frame.of(4, 0, 0, 0, 7, 224),
+                DisplayCodec.commitStaged(256)), frames);
+    }
+
+    @Test
+    @DisplayName("RLE 路径是 0x07 → RLE 帧，没有 0x08，也没有 action 0x09")
     void rleStreamHasNoCommit() {
         List<Frame> frames = PixelStreamCodec.encodeRleStream(new int[]{0xF800, 0xF800}, 4);
-        assertEquals(3, frames.size());
+        assertEquals(2, frames.size());
         assertEquals(Commands.DISPLAY, frames.getFirst().command());
         assertEquals(DisplayAction.BEGIN_STREAM, frames.getFirst().data0());
         assertEquals(Commands.RLE, frames.get(1).command());
-        assertEquals(DisplayAction.WAIT_TRANSFER_DONE, frames.getLast().data0());
     }
 }

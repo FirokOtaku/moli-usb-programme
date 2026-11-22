@@ -38,6 +38,10 @@ void main() {
       expect(DeviceProfile.lite.serial.rtscts, isTrue);
       expect(DeviceProfile.pro.serial.baudRate, 921600);
       expect(DeviceProfile.pro.serial.rtscts, isTrue);
+      expect(DeviceProfile.mini.display.width, 160);
+      expect(DeviceProfile.mini.display.height, 80);
+      expect(DeviceProfile.pro.display.width, 320);
+      expect(DeviceProfile.pro.display.height, 172);
     });
 
     test('MINI 默认旧版串口参数', () {

@@ -59,6 +59,32 @@ public final class HandshakeCodec {
     }
 
     /**
+     * {@code length} 个字节是否是设备横幅 {@code \0MSNxx} 的真前缀。
+     *
+     * <p>真前缀不足 6 字节，且与 {@code 00 4D 53 4E} 加一位 ASCII 数字一致。实机上
+     * 一次读到的 7 或 11 字节就是 6 字节命令帧再加这种前缀，不是更长的命令编码。</p>
+     */
+    public static boolean isBannerPrefix(byte[] bytes, int offset, int length) {
+        if (bytes == null || length <= 0 || length >= 6) {
+            return false;
+        }
+        if (offset < 0 || offset + length > bytes.length) {
+            return false;
+        }
+        int limit = Math.min(length, MSN_PREFIX.length);
+        for (int i = 0; i < limit; i++) {
+            if (bytes[offset + i] != MSN_PREFIX[i]) {
+                return false;
+            }
+        }
+        if (length >= 5) {
+            int digit = bytes[offset + 4] & 0xFF;
+            return digit >= 0x30 && digit <= 0x39;
+        }
+        return true;
+    }
+
+    /**
      * {@code bytes} 是否为握手确认响应 {@code \0MSNCN}。
      *
      * <p>握手阶段设备仍可能插入横幅，因此前 6 字节不是确认帧时返回 {@code false}，

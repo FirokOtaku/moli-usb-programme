@@ -74,6 +74,32 @@ void main() {
       expect(frames, hasLength(1));
       expectFrame(frames.single, '09 32 F8 00 00 00');
     });
+
+    test('128 像素块与 MSN_compaction 逐字节一致', () {
+      const red = 0xF800;
+      const green = 0x07E0;
+      const blue = 0x001F;
+      const white = 0xFFFF;
+      final pixels = <int>[
+        for (var pair = 0; pair < 4; pair++) ...[
+          ...List<int>.filled(15, red),
+          ...List<int>.filled(15, green),
+        ],
+        ...List<int>.filled(4, blue),
+        ...List<int>.filled(4, white),
+      ];
+      final frames = RleCodec.encode(pixels);
+      expect(frames, hasLength(5));
+      final bytes = frames.expand((frame) => frame.bytes).toList();
+      expect(
+        toHex(bytes),
+        '09FFF80007E0'
+        '09FFF80007E0'
+        '09FFF80007E0'
+        '09FFF80007E0'
+        '0944001FFFFF',
+      );
+    });
   });
 
   group('编码器基础行为', () {
@@ -191,11 +217,11 @@ void main() {
     test('128 像素的完整块与尾部短块都产生帧', () {
       final pixels = List<int>.filled(130, Rgb565Colors.white.value);
       final frames = RleCodec.encode(pixels);
-      // A run caps at 15 pixels, so 128 pixels need 8 frames of 15 plus one
-      // frame of 8; the 2-pixel tail becomes its own block.
-      expect(frames, hasLength(9 + 1));
-      expect(frames.first.subcommand >> 4, 15);
-      expect(frames[8].subcommand, 0x80);
+      // MSN_compaction pairs 15+15. 128 pixels are 4 such frames plus one
+      // 8-pixel frame; the 2-pixel tail is its own block.
+      expect(frames, hasLength(5 + 1));
+      expect(frames.first.subcommand, 0xFF);
+      expect(frames[4].subcommand, 0x80);
       expect(frames.last.subcommand & 0x0F, 0);
       expect(frames.last.subcommand >> 4, 2);
       // Frames never exceed one 128-pixel block worth of decoded pixels.

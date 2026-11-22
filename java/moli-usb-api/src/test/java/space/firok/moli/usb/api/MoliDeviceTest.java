@@ -6,7 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import space.firok.moli.usb.api.codec.Commands;
 import space.firok.moli.usb.api.codec.DisplayAction;
+import space.firok.moli.usb.api.codec.Frame;
+import space.firok.moli.usb.api.codec.PixelStreamCodec;
+import space.firok.moli.usb.api.codec.HandshakeCodec;
 import space.firok.moli.usb.api.codec.DisplaySub;
 import space.firok.moli.usb.api.codec.SfrCodec;
 import space.firok.moli.usb.api.codec.SfrTableParser;
@@ -227,6 +231,47 @@ class MoliDeviceTest {
     class Display {
 
         @Test
+        @DisplayName("MINI 固件表：Lcd_X/Lcd_Y 是地址 0/1 的 u16，不会读成 160x0")
+        void firmwareTableReadsU16Geometry() {
+            ScriptedDevice device = new ScriptedDevice("COM-A");
+            byte[] table = firmwareLcdTable();
+            for (int i = 0; i < table.length; i++) {
+                device.setSfr(SfrTableParser.TABLE_ADDRESS + i, table[i] & 0xFF);
+            }
+            device.setSfrU16(0x00, 160);
+            device.setSfrU16(0x01, 80);
+            try (MoliDevice moli = openMini(device)) {
+                assertEquals(160, moli.info().screenWidth());
+                assertEquals(80, moli.info().screenHeight());
+                assertEquals(160, moli.display().orElseThrow().width());
+                assertEquals(80, moli.display().orElseThrow().height());
+            }
+        }
+
+        @Test
+        @DisplayName("横幅尾巴不会把 Lcd_X/Lcd_Y 读成 0x0，填充帧仍会发出")
+        void bannerTailDoesNotZeroScreenSizeOrAbortFill() {
+            ScriptedDevice device = new ScriptedDevice("COM-A");
+            byte[] table = lcdTable();
+            for (int i = 0; i < table.length; i++) {
+                device.setSfr(SfrTableParser.TABLE_ADDRESS + i, table[i] & 0xFF);
+            }
+            // byte 5 of the register read is the size. The trailing banner is not.
+            device.setSfr(0x0200, 160);
+            device.setSfr(0x0201, 80);
+            device.setEchoTail(HandshakeCodec.encodeBanner(1));
+            try (MoliDevice moli = openMini(device)) {
+                assertEquals(160, moli.info().screenWidth());
+                assertEquals(80, moli.info().screenHeight());
+                device.clearWrites();
+                moli.fillRect(new Rect(0, 0, 160, 80), Rgb565.WHITE);
+                List<byte[]> writes = device.frames();
+                assertEquals(4, writes.size());
+                assertArrayEquals(frame(0x02, 0x03, 0x0B, 0xFF, 0xFF, 0x00), writes.get(3));
+            }
+        }
+
+        @Test
         @DisplayName("fillRect 依次发送坐标、尺寸、两色与填充动作")
         void fillRectSendsExpectedFrames() {
             ScriptedDevice device = new ScriptedDevice("COM-A");
@@ -290,13 +335,22 @@ class MoliDeviceTest {
                 Rect rect = new Rect(0, 0, 8, 1);
                 int[] pixels = new int[8];
                 java.util.Arrays.fill(pixels, Rgb565.GREEN.value());
+                long started = System.nanoTime();
                 moli.streamImage(rect, pixels);
+                long elapsedMs = java.time.Duration.ofNanos(System.nanoTime() - started).toMillis();
                 List<byte[]> writes = device.frames();
-                // 2 帧区域设置 + 0x07 + 4 帧暂存区（16 字节 / 4）+ 0x08 + 0x09
-                assertEquals(9, writes.size());
+                // 2 帧区域设置 + 0x07 + 64 帧暂存区（尾部补 FF）+ 0x08 + 0x09
+                assertEquals(69, writes.size());
+                // 0x08 / 0x09 与暂存帧同一次写出。若仍逐帧等待，虚拟设备不回执，
+                // 这里会吃掉完整命令超时。
+                assertTrue(elapsedMs < 80, "像素流不应等待 0x08/0x09 回执，实际 " + elapsedMs + " ms");
+                List<byte[]> payloads = device.payloadWrites();
+                assertTrue(payloads.stream().anyMatch(payload -> payload.length > Frame.LENGTH),
+                        "暂存帧、0x08 和 0x09 应合成一次写入");
                 assertArrayEquals(frame(0x02, 0x03, 0x07, 0x00, 0x00, 0x00), writes.get(2));
-                assertArrayEquals(frame(0x02, 0x03, 0x08, 0x00, 0x10, 0x00), writes.get(7));
-                assertArrayEquals(frame(0x02, 0x03, 0x09, 0x00, 0x00, 0x00), writes.get(8));
+                assertArrayEquals(frame(0x04, 0x04, 0xFF, 0xFF, 0xFF, 0xFF), writes.get(7));
+                assertArrayEquals(frame(0x02, 0x03, 0x08, 0x00, 0x10, 0x00), writes.get(67));
+                assertArrayEquals(frame(0x02, 0x03, 0x09, 0x00, 0x00, 0x00), writes.get(68));
                 // 第一个暂存区帧携带绿色像素的高、低字节。
                 assertArrayEquals(frame(0x04, 0x00, 0x07, 0xE0, 0x07, 0xE0), writes.get(3));
             }
@@ -309,6 +363,39 @@ class MoliDeviceTest {
             try (MoliDevice moli = openMini(device)) {
                 assertThrows(InvalidArgumentError.class,
                         () -> moli.streamImage(new Rect(0, 0, 4, 4), new int[15]));
+            }
+        }
+
+        @Test
+        @DisplayName("160x80 画面是一次压缩写出，不是 39006 字节未压缩载荷")
+        void liveFrameIsOneCompressedWrite() {
+            ScriptedDevice device = new ScriptedDevice("COM-A");
+            try (MoliDevice moli = openMini(device)) {
+                int[] pixels = new int[160 * 80];
+                java.util.Arrays.fill(pixels, Rgb565.GREEN.value());
+                byte[] wire = PixelStreamCodec.toWireBytes(pixels);
+                int uncompressed = 0;
+                for (Frame frame : PixelStreamCodec.encodeStream(wire)) {
+                    if (frame.command() == Commands.DISPLAY
+                            && frame.data0() == DisplayAction.BEGIN_STREAM) {
+                        continue;
+                    }
+                    uncompressed += Frame.LENGTH;
+                }
+                assertEquals(39006, uncompressed);
+
+                device.clearWrites();
+                moli.streamImageRle(new Rect(0, 0, 160, 80), pixels, 0);
+                List<byte[]> payloads = device.payloadWrites();
+                List<byte[]> bulk = payloads.stream().filter(payload -> payload.length > Frame.LENGTH).toList();
+                assertEquals(1, bulk.size(), "RLE 数据应是一次写出，实际 " + payloads.size() + " 次写");
+                byte[] payload = bulk.getFirst();
+                assertTrue(payload.length < uncompressed / 5,
+                        "压缩后 " + payload.length + " 字节，未压缩静默载荷 " + uncompressed);
+                assertEquals(0, payload.length % Frame.LENGTH);
+                for (int offset = 0; offset < payload.length; offset += Frame.LENGTH) {
+                    assertEquals(Commands.RLE, payload[offset] & 0xFF);
+                }
             }
         }
 
@@ -509,6 +596,56 @@ class MoliDeviceTest {
                 && (wire[0] & 0xFF) == 0x02
                 && (wire[1] & 0xFF) == 0x03
                 && (wire[2] & 0xFF) == DisplayAction.APPLY_LEDS;
+    }
+
+    /**
+     * MINI 固件 V1.2 的表形：family {@code 0x21} 后有 NUL，{@code Lcd_X} 地址 0，
+     * {@code Lcd_Y} 地址 1。数值要再读 u16 SFR，不在表本身里。
+     */
+    private static byte[] firmwareLcdTable() {
+        byte[] table = new byte[SfrTableParser.TABLE_LENGTH];
+        int offset = 0;
+        offset = putCString(table, offset, "Lcd_X".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        offset = putCString(table, offset, new byte[]{0x20});
+        table[offset++] = 0x21;
+        table[offset++] = 0;
+        table[offset++] = 0x00;
+        offset = putCString(table, offset, "Lcd_Y".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        offset = putCString(table, offset, new byte[]{0x20});
+        table[offset++] = 0x21;
+        table[offset++] = 0;
+        table[offset] = 0x01;
+        return table;
+    }
+
+    /**
+     * 最小自描述表：{@code Lcd_X} / {@code Lcd_Y} 是 u8 寄存器地址 0x0200 / 0x0201。
+     * 数值在寄存器的 byte 5，不在表本身里。
+     */
+    private static byte[] lcdTable() {
+        byte[] nameX = "Lcd_X".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        byte[] nameY = "Lcd_Y".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        byte[] unit = "px".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        byte[] table = new byte[SfrTableParser.TABLE_LENGTH];
+        int offset = 0;
+        offset = putCString(table, offset, nameX);
+        offset = putCString(table, offset, unit);
+        table[offset++] = 0x01;
+        table[offset++] = 0;
+        table[offset++] = 0x02;
+        table[offset++] = 0x00;
+        offset = putCString(table, offset, nameY);
+        offset = putCString(table, offset, unit);
+        table[offset++] = 0x01;
+        table[offset++] = 0;
+        table[offset++] = 0x02;
+        table[offset] = 0x01;
+        return table;
+    }
+
+    private static int putCString(byte[] table, int offset, byte[] text) {
+        System.arraycopy(text, 0, table, offset, text.length);
+        return offset + text.length + 1;
     }
 
     private static byte[] frame(int... values) {

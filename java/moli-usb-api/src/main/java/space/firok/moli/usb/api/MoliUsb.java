@@ -73,14 +73,22 @@ public final class MoliUsb {
      * <p>若候选标记为不可用，先重新枚举一次以确认状态，避免用过期快照打开设备。</p>
      */
     public MoliDevice open(DeviceCandidate candidate, MoliOptions options) {
+        return open(candidate, options, CancellationToken.none());
+    }
+
+    /** 打开一个候选设备，并允许宿主在握手期间取消。 */
+    public MoliDevice open(DeviceCandidate candidate, MoliOptions options,
+                           CancellationToken token) {
         Objects.requireNonNull(candidate, "candidate");
         Objects.requireNonNull(options, "options");
+        Objects.requireNonNull(token, "token");
+        token.throwIfCancelled("open", candidate.id().toString());
 
         DeviceCandidate resolved = refresh(candidate, options.registry());
+        token.throwIfCancelled("open", resolved.id().toString());
         Transport transport = provider.open(resolved);
         try {
-            MoliDevice device = MoliDeviceImpl.open(resolved, transport, options,
-                    CancellationToken.none());
+            MoliDevice device = MoliDeviceImpl.open(resolved, transport, options, token);
             openDevices.add(device);
             return device;
         } catch (RuntimeException failure) {

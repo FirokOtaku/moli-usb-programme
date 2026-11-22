@@ -34,8 +34,17 @@ public final class SerialTransport implements Transport {
     /** 单次底层读阻塞的上限（毫秒）。 */
     static final int READ_GRANULARITY_MS = 20;
 
-    /** 写超时（毫秒）。写入很小的命令帧，超时取保守值即可。 */
+    /**
+     * 单次 {@code writeBytes} 的超时（毫秒）。jSerialComm 只有整段请求在该时间内写完
+     * 才返回正数，否则返回 0，即使驱动已经送出前缀。
+     */
     static final int WRITE_TIMEOUT_MS = 1000;
+
+    /**
+     * 一次交给驱动的最大字节数。19200 下 512 字节约 0.3 秒，能在
+     * {@link #WRITE_TIMEOUT_MS} 内写完。整段 39006 字节一次写必然超时并返回 0。
+     */
+    static final int WRITE_CHUNK_BYTES = 512;
 
     private static final byte[] EMPTY = new byte[0];
 
@@ -83,28 +92,50 @@ public final class SerialTransport implements Transport {
         return open(PortDescriptor.ofName(portName), config);
     }
 
+    /**
+     * 读路径会不会在每次 {@link #read} 时改端口超时。
+     *
+     * <p>必须保持 false。jSerialComm 把 semi-blocking + 0 ms 实现成
+     * {@code TIMEOUT_NONBLOCKING}，而 {@code setComPortTimeouts} 在该模式下若写超时
+     * 仍为正，原生 {@code configPort} 会返回 false。会话层的立即读取正是 0 ms。
+     * 在已经打开的 COM 上反复切到 0 ms，会抛「设置读超时 0 ms 失败」并把还活着的
+     * 会话拆掉。超时只在打开时设一次。</p>
+     */
+    static boolean retunesReadTimeout() {
+        return false;
+    }
+
+    private static void applyPortSettings(SerialPort port, SerialPortConfig config) throws IOException {
+        if (!port.setComPortParameters(config.baudRate(), config.dataBits(),
+                config.stopBits(), config.parity())) {
+            throw new IOException("设置串口参数失败: " + config.describe());
+        }
+        if (!port.setFlowControl(config.flowControl())) {
+            throw new IOException("设置流控失败: " + config.describe());
+        }
+        if (!port.setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING
+                | SerialPort.TIMEOUT_WRITE_BLOCKING, READ_GRANULARITY_MS, WRITE_TIMEOUT_MS)) {
+            throw new IOException("设置串口超时失败");
+        }
+    }
+
     private static SerialTransport openPort(SerialPort port, String portName,
                                             SerialPortConfig config) {
-        // 先开端口再设参数：jSerialComm 的 setComPortParameters 作用于已打开的句柄。
-        if (!port.openPort()) {
-            throw new DeviceNotFoundError("open", portName,
-                    "打开串口失败（jSerialComm 错误码 " + port.getLastErrorCode()
-                            + "，位置 " + port.getLastErrorLocation() + "）");
-        }
         boolean configured = false;
         try {
-            if (!port.setComPortParameters(config.baudRate(), config.dataBits(),
-                    config.stopBits(), config.parity())) {
-                throw new IOException("设置串口参数失败: " + config.describe());
+            // 参数必须在 open 之前写到对象上。jSerialComm 在句柄还是 0 时只保存字段，
+            // openPort 才真正下发。只在打开之后再设 RTS/CTS 时，921600 的第一次写出
+            // 可能还没带上流控，PRO 会一直广播横幅、不回 \0MSNCN。
+            applyPortSettings(port, config);
+            if (!port.openPort()) {
+                throw new DeviceNotFoundError("open", portName,
+                        "打开串口失败（jSerialComm 错误码 " + port.getLastErrorCode()
+                                + "，位置 " + port.getLastErrorLocation() + "）");
             }
-            if (!port.setFlowControl(config.flowControl())) {
-                throw new IOException("设置流控失败: " + config.describe());
-            }
-            if (!port.setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING,
-                    READ_GRANULARITY_MS, WRITE_TIMEOUT_MS)) {
-                throw new IOException("设置串口超时失败");
-            }
+            applyPortSettings(port, config);
             configured = true;
+        } catch (DeviceNotFoundError failed) {
+            throw failed;
         } catch (IOException failed) {
             throw new DeviceNotFoundError("open", portName,
                     "串口 " + portName + " 打开后配置失败：" + failed.getMessage(), failed);
@@ -130,7 +161,11 @@ public final class SerialTransport implements Transport {
             long deadlineNanos = System.nanoTime()
                     + Math.max(0, timeoutMs) * 1_000_000L;
             byte[] buffer = new byte[maxBytes];
-            applyReadTimeout(timeoutMs <= 0 ? 0 : Math.min(timeoutMs, READ_GRANULARITY_MS));
+            if (retunesReadTimeout()) {
+                applyReadTimeout(timeoutMs <= 0 ? 0 : Math.min(timeoutMs, READ_GRANULARITY_MS));
+            } else if (timeoutMs <= 0 && port.bytesAvailable() <= 0) {
+                return EMPTY;
+            }
 
             while (true) {
                 int count = port.readBytes(buffer, buffer.length);
@@ -152,7 +187,9 @@ public final class SerialTransport implements Transport {
                 if (remainingMs <= 0) {
                     return EMPTY;
                 }
-                applyReadTimeout((int) Math.min(remainingMs, READ_GRANULARITY_MS));
+                if (retunesReadTimeout()) {
+                    applyReadTimeout((int) Math.min(remainingMs, READ_GRANULARITY_MS));
+                }
             }
         } finally {
             lock.unlock();
@@ -169,15 +206,17 @@ public final class SerialTransport implements Transport {
             }
             int offset = 0;
             while (offset < data.length) {
-                int written = port.writeBytes(data, data.length - offset, offset);
+                int length = Math.min(WRITE_CHUNK_BYTES, data.length - offset);
+                int written = port.writeBytes(data, length, offset);
                 if (written < 0) {
                     throw new IOException("写串口 " + address + " 失败（已写 " + offset
                             + "/" + data.length + " 字节）");
                 }
                 if (written == 0) {
-                    // 写超时或缓冲满：视为断开，避免无限重试把会话卡死。
-                    throw new IOException("写串口 " + address + " 超时（已写 " + offset
-                            + "/" + data.length + " 字节）");
+                    // In blocking mode a zero count cannot rule out a prefix on
+                    // the wire. Replaying an unknown suffix corrupts frame alignment.
+                    throw new IOException("写串口 " + address + " 超时（已确认写入 " + offset
+                            + "/" + data.length + " 字节；当前块进度未知）");
                 }
                 offset += written;
             }
@@ -196,8 +235,9 @@ public final class SerialTransport implements Transport {
             // 只清接收缓冲：读空即可，不能用 flushIOBuffers（它同时丢弃待发数据）。
             byte[] sink = new byte[512];
             int guard = 0;
-            while (port.bytesAvailable() > 0 && guard++ < 1024) {
-                if (port.readBytes(sink, sink.length) <= 0) {
+            int waiting;
+            while ((waiting = port.bytesAvailable()) > 0 && guard++ < 1024) {
+                if (port.readBytes(sink, Math.min(waiting, sink.length)) <= 0) {
                     break;
                 }
             }
@@ -238,7 +278,9 @@ public final class SerialTransport implements Transport {
     }
 
     private void applyReadTimeout(int timeoutMs) throws IOException {
-        if (!port.setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING,
+        // jSerialComm interprets semi-blocking + 0 as wait indefinitely, not poll.
+        int mode = timeoutMs == 0 ? SerialPort.TIMEOUT_NONBLOCKING : SerialPort.TIMEOUT_READ_SEMI_BLOCKING;
+        if (!port.setComPortTimeouts(mode | SerialPort.TIMEOUT_WRITE_BLOCKING,
                 timeoutMs, WRITE_TIMEOUT_MS)) {
             throw new IOException("设置读超时 " + timeoutMs + " ms 失败（端口 "
                     + address + "）");

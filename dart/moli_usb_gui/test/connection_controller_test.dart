@@ -41,7 +41,17 @@ void main() {
     expect(fallback.usedProfileFallback, isTrue);
     expect(fallback.width, DeviceProfile.pro.display.width);
     expect(fallback.height, DeviceProfile.pro.display.height);
-    expect(fallback.warning, isNotNull);
+    expect(fallback.warning, contains('设备报告的屏幕尺寸'));
+
+    final missing = resolvePanelGeometry(
+      reportedWidth: 0,
+      reportedHeight: 0,
+      profile: DeviceProfile.pro,
+    );
+    expect(missing.width, 320);
+    expect(missing.height, 172);
+    expect(missing.warning, contains('自描述表没有给出 Lcd_X/Lcd_Y'));
+    expect(missing.warning, isNot(contains('0x0')));
   });
 
   test('connect locks controls and disconnect unlocks them', () async {
@@ -102,6 +112,71 @@ void main() {
       isTrue,
     );
     expect(provider.lastPort?.isClosed, isTrue);
+    expect(provider.openCount, 1);
+  });
+
+  test('PRO and MINI recover from an open timeout without restarting', () async {
+    for (final profile in [DeviceProfile.pro, DeviceProfile.mini]) {
+      final provider = FakeHostProvider(failOpen: const MoliException.timeout('open timed out'));
+      final controller = _controller(provider);
+      addTearDown(controller.dispose);
+      await controller.refresh();
+      controller.selectCandidate(provider.portKey);
+      controller.selectProfile(profile.name);
+      await controller.connect();
+      expect(controller.phase, ConnectionPhase.disconnected);
+      expect(controller.connectEnabled, isTrue);
+      expect(controller.statusText, contains('Timeout'));
+      provider.failOpen = null;
+      await controller.connect();
+      expect(controller.phase, ConnectionPhase.connected);
+      expect(provider.lastSettings, profile.serial);
+      await controller.disconnect();
+      expect(provider.lastPort!.isClosed, isTrue);
+    }
+  });
+
+  test('link loss reconnects same profile and never replays queued writes', () async {
+    final provider = FakeHostProvider();
+    final controller = _controller(provider);
+    addTearDown(controller.dispose);
+    await controller.refresh();
+    controller.selectCandidate(provider.portKey);
+    controller.selectProfile(DeviceProfile.nameMini);
+    await controller.connect();
+    final oldPort = provider.lastPort!;
+    final failed = controller.submit<void>((_) async {
+      throw const MoliException.disconnected('transport write failed');
+    });
+    var staleRan = false;
+    final stale = controller.submit<void>((_) async { staleRan = true; });
+    await Future.wait([
+      expectLater(failed, throwsA(isA<MoliException>())),
+      expectLater(stale, throwsA(isA<MoliException>())),
+    ]);
+    expect(oldPort.isClosed, isTrue);
+    expect(controller.disconnectEnabled, isTrue);
+    expect(provider.openCount, 1);
+    await Future<void>.delayed(const Duration(milliseconds: 1300));
+    expect(controller.phase, ConnectionPhase.connected);
+    expect(provider.openCount, 2);
+    expect(provider.lastSettings, DeviceProfile.mini.serial);
+    expect(staleRan, isFalse);
+  });
+
+  test('explicit disconnect cancels scheduled recovery', () async {
+    final provider = FakeHostProvider();
+    final controller = _controller(provider);
+    addTearDown(controller.dispose);
+    await controller.refresh();
+    controller.selectCandidate(provider.portKey);
+    await controller.connect();
+    await expectLater(controller.submit<void>((_) async {
+      throw const MoliException.disconnected('transport write failed');
+    }), throwsA(isA<MoliException>()));
+    await controller.disconnect();
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+    expect(controller.phase, ConnectionPhase.disconnected);
     expect(provider.openCount, 1);
   });
 

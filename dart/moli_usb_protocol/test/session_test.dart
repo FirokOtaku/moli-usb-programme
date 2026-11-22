@@ -243,7 +243,7 @@ void main() {
       addTearDown(session.disconnect);
 
       await expectLater(
-        session.setOrigin(1, 2),
+        session.readSfrU8(0x0100),
         throwsA(isA<MoliException>()
             .having((e) => e.kind, 'kind', MoliErrorKind.timeout)),
       );
@@ -264,7 +264,7 @@ void main() {
 
       Object? caught;
       try {
-        await session.setRegionSize(160, 80);
+        await session.readSfrU8(0x0100);
       } catch (error) {
         caught = error;
       }
@@ -286,7 +286,10 @@ void main() {
       await session.connect();
       addTearDown(session.disconnect);
 
-      await expectLater(session.setOrigin(0, 0), throwsA(isA<MoliException>()));
+      await expectLater(
+        session.readSfrU8(0x0100),
+        throwsA(isA<MoliException>()),
+      );
 
       port.autoRespond = true;
       await session.setOrigin(3, 4);
@@ -573,6 +576,142 @@ void main() {
   });
 
   group('设备 API 门面', () {
+    test('7 字节响应取 byte 5，不把横幅前缀 00 当成寄存器值', () async {
+      final port = FakeMsu2Port()
+        ..responseByte5 = 0xA0
+        ..echoTail = const [0x00];
+      final session = MoliSession(port: port, profile: DeviceProfile.lite);
+      await session.connect();
+      addTearDown(session.disconnect);
+      expect(await session.readSfrU8(0x0123), 0xA0);
+    });
+
+    test('11 字节响应收齐横幅后下一次读取仍对齐', () async {
+      final port = FakeMsu2Port()
+        ..responseByte5 = 0x50
+        ..echoTail = const [0x00, 0x4D, 0x53, 0x4E, 0x30];
+      final session = MoliSession(port: port, profile: DeviceProfile.lite);
+      await session.connect();
+      addTearDown(session.disconnect);
+      expect(await session.readSfrU8(0x0100), 0x50);
+      port.inject(const [0x31]);
+      expect(await session.readSfrU8(0x0101), 0x50);
+    });
+
+    test('非横幅尾巴仍然失步，不靠放宽 6 字节上限', () async {
+      final port = FakeMsu2Port()..echoTail = const [0x55, 0x66];
+      final session = MoliSession(port: port, profile: DeviceProfile.lite);
+      await session.connect();
+      addTearDown(session.disconnect);
+      await expectLater(
+        session.readSfrU8(0x0100),
+        throwsA(isA<MoliException>().having(
+          (e) => e.kind,
+          'kind',
+          MoliErrorKind.protocolDesynchronized,
+        )),
+      );
+    });
+
+    test('带横幅尾巴的自描述表不会把屏幕尺寸读成 0x0', () async {
+      final table = Uint8List(256);
+      final header = <int>[
+        ...'Lcd_X'.codeUnits, 0,
+        ...'px'.codeUnits, 0,
+        0x01, 0, 0x02, 0x00,
+        ...'Lcd_Y'.codeUnits, 0,
+        ...'px'.codeUnits, 0,
+        0x01, 0, 0x02, 0x01,
+      ];
+      table.setAll(0, header);
+      final port = FakeMsu2Port()..echoTail = defaultBanner;
+      for (var i = 0; i < table.length; i++) {
+        port.sfrU8[0x0100 + i] = table[i];
+      }
+      port.sfrU8[0x0200] = 160;
+      port.sfrU8[0x0201] = 80;
+      final session = MoliSession(
+        port: port,
+        profile: DeviceProfile.mini,
+        options: const SessionOptions(readSelfDescription: true),
+      );
+      final info = await session.connect();
+      addTearDown(session.disconnect);
+      expect(info.display.width, 160);
+      expect(info.display.height, 80);
+    });
+
+    test('固件表 Lcd_X 地址 0 不会把尺寸读成 160x0', () async {
+      final table = Uint8List(256);
+      var offset = 0;
+      offset = _putFirmwareEntry(table, offset, 'Lcd_X', 0x21, [0x00]);
+      offset = _putFirmwareEntry(table, offset, 'Lcd_Y', 0x21, [0x01]);
+      _putFirmwareEntry(table, offset, 'Flash_Info', 0x21, [0x02]);
+      final port = FakeMsu2Port();
+      for (var i = 0; i < table.length; i++) {
+        port.sfrU8[0x0100 + i] = table[i];
+      }
+      port.sfrU16[0x00] = 160;
+      port.sfrU16[0x01] = 80;
+      final session = MoliSession(
+        port: port,
+        profile: DeviceProfile.mini,
+        options: const SessionOptions(readSelfDescription: true),
+      );
+      final info = await session.connect();
+      addTearDown(session.disconnect);
+      expect(info.display.width, 160);
+      expect(info.display.height, 80);
+    });
+
+    test('全零自描述表只读首字节，PRO 尺寸回退到 320x172', () async {
+      final port = FakeMsu2Port();
+      final session = MoliSession(
+        port: port,
+        profile: DeviceProfile.pro,
+        options: const SessionOptions(readSelfDescription: true),
+      );
+      final info = await session.connect();
+      addTearDown(session.disconnect);
+      expect(info.display.width, 320);
+      expect(info.display.height, 172);
+      final tableReads = port.writes
+          .where((frame) => toHex(frame).startsWith('00300001'))
+          .toList();
+      expect(tableReads, hasLength(1));
+      expect(toHex(tableReads.single), '003000010000');
+    });
+
+    test('显示设置帧无回执时仍发出填充，不等完整命令超时', () async {
+      final port = FakeMsu2Port()..autoRespond = false;
+      final session = MoliSession(
+        port: port,
+        profile: DeviceProfile.lite,
+        options: const SessionOptions(
+          operationTimeout: Duration(milliseconds: 80),
+          readSliceTimeout: Duration(milliseconds: 10),
+        ),
+      );
+      await session.connect();
+      addTearDown(session.disconnect);
+      final started = DateTime.now();
+      await expectLater(
+        MoliDeviceApi(session).fillRect(
+          const Rect(0, 0, 160, 80),
+          Rgb565Colors.white,
+        ),
+        throwsA(isA<MoliException>()
+            .having((e) => e.kind, 'kind', MoliErrorKind.timeout)),
+      );
+      final elapsed = DateTime.now().difference(started);
+      final frames = port.writes.where((w) => !_isChallenge(w)).toList();
+      expect(frames, hasLength(3));
+      expect(toHex(frames[0]), '020000000000');
+      expect(toHex(frames[1]), '020100A00050');
+      expect(toHex(frames[2]), '02030BFFFF00');
+      expect(elapsed, lessThan(const Duration(milliseconds: 400)));
+    });
+
     test('fillRect 先设区域再填充，并做边界检查', () async {
       final session = await connectedSession();
       final api = MoliDeviceApi(session);
@@ -617,8 +756,12 @@ void main() {
       );
     });
 
-    test('drawPixelsRle 设置区域后发送 RleCodec 帧', () async {
-      final session = await connectedSession();
+    test('drawPixelsRle 设置区域后发送 RleCodec 帧，且不读数据帧', () async {
+      final session = await connectedSession(
+        options: const SessionOptions(
+          operationTimeout: Duration(milliseconds: 80),
+        ),
+      );
       final api = MoliDeviceApi(session);
       final port = session.port as FakeMsu2Port;
       final before = port.writes.length;
@@ -632,11 +775,17 @@ void main() {
           Rgb565Colors.black,
         ],
       );
-      final frames = port.writes.skip(before).toList();
-      expect(frames, hasLength(3));
+      final frames = _framesOf(port.writes.skip(before));
+      // setXy, setSize, beginStream(07), one RLE data frame. No action 0x09.
+      expect(frames, hasLength(4));
       expect(toHex(frames[0]), '020000010002');
       expect(toHex(frames[1]), '020100050001');
-      expect(toHex(frames[2]), '0932F8000000');
+      expect(toHex(frames[2]), '020307000000');
+      expect(toHex(frames[3]), '0932F8000000');
+      expect(
+        port.writes.skip(before).any((w) => w.length > 6),
+        isFalse,
+      );
     });
 
     test('drawPixelsRle 最坏帧数超过上界时拒绝且不发送', () async {
@@ -659,25 +808,79 @@ void main() {
       expect(port.writes.length, before);
     });
 
-    test('4x4 图片走完整的像素流帧序列', () async {
-      final session = await connectedSession();
+    test('4x4 图片走完整的像素流帧序列，且不读 0x04/0x08/0x09', () async {
+      final session = await connectedSession(
+        options: const SessionOptions(
+          operationTimeout: Duration(milliseconds: 80),
+        ),
+      );
       final api = MoliDeviceApi(session);
       final port = session.port as FakeMsu2Port;
+      final started = DateTime.now();
       await api.drawPixels(
         const Rect(0, 0, 4, 4),
         List<Rgb565Color>.filled(16, Rgb565Colors.red),
       );
-      final frames = port.writes.where((w) => !_isChallenge(w)).toList();
-      // setXy, setSize, beginStream(07), 8 staging frames for 32 bytes,
-      // commit(08) with the batch length, waitTransferDone(09).
-      expect(frames, hasLength(13));
+      final elapsed = DateTime.now().difference(started);
+      final commandWrites =
+          port.writes.where((w) => !_isChallenge(w)).toList();
+      final frames = _framesOf(commandWrites);
+      // setXy, setSize, beginStream(07), 64 staging frames (padded FF),
+      // commit(08) with the actual batch length, waitTransferDone(09).
+      expect(frames, hasLength(69));
       expect(toHex(frames[2]), '020307' '000000');
       expect(toHex(frames[3]), '0400F800F800');
       expect(toHex(frames[10]), '0407F800F800');
-      expect(toHex(frames[11]), '020308' '002000');
-      expect(toHex(frames[12]), '020309' '000000');
+      expect(toHex(frames[11]), '0408FFFFFFFF');
+      expect(toHex(frames[67]), '020308' '002000');
+      expect(toHex(frames[68]), '020309' '000000');
+      expect(
+        commandWrites.any((w) => w.length > kFrameLength),
+        isTrue,
+        reason: '0x04/0x08/0x09 应合成一次写出',
+      );
+      expect(elapsed, lessThan(const Duration(milliseconds: 400)));
     });
   });
+}
+
+int _putFirmwareEntry(
+  Uint8List table,
+  int offset,
+  String name,
+  int family,
+  List<int> data,
+) {
+  offset = _putCString(table, offset, name);
+  offset = _putCString(table, offset, ' ');
+  table[offset++] = family;
+  table[offset++] = 0;
+  for (final byte in data) {
+    table[offset++] = byte;
+  }
+  return offset;
+}
+
+int _putCString(Uint8List table, int offset, String text) {
+  for (final unit in text.codeUnits) {
+    table[offset++] = unit;
+  }
+  table[offset++] = 0;
+  return offset;
+}
+
+List<Uint8List> _framesOf(Iterable<Uint8List> writes) {
+  final frames = <Uint8List>[];
+  for (final write in writes) {
+    if (write.length % kFrameLength != 0) {
+      frames.add(write);
+      continue;
+    }
+    for (var i = 0; i < write.length; i += kFrameLength) {
+      frames.add(Uint8List.sublistView(write, i, i + kFrameLength));
+    }
+  }
+  return frames;
 }
 
 bool _isChallenge(Uint8List bytes) {

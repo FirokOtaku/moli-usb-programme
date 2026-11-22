@@ -15,6 +15,7 @@ import space.firok.moli.usb.api.error.TimeoutError;
 import space.firok.moli.usb.api.transport.Transport;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalInt;
@@ -46,6 +47,14 @@ public final class ProtocolSession implements AutoCloseable {
     private final ReentrantLock operationLock = new ReentrantLock(true);
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Inbox inbox = new Inbox();
+
+    /**
+     * 发送前把已缓冲的横幅前缀收齐的窗口。19200 波特下 6 字节约 3 ms，40 ms 足够
+     * 等完已经在途的那一截，又不会把每次命令都拖成完整命令超时。
+     */
+    private static final Duration BANNER_PREFIX_DRAIN = Duration.ofMillis(40);
+    /** 连续广播横幅时，立即排空不能追着设备流无限读取。 */
+    private static final int MAX_IMMEDIATE_READS = 32;
 
     private volatile int protocolVersion = -1;
 
@@ -145,19 +154,19 @@ public final class ProtocolSession implements AutoCloseable {
             int recoveries = 0;
             while (true) {
                 cancellationToken.throwIfCancelled(operation, deviceKey);
-                if (inbox.size() > 0) {
-                    // 发送前接收缓冲有残留：上一轮的响应还没被取走，响应必然错配。
+                byte[] raw;
+                try {
+                    raw = transmitAndReceive(request, operation, cancellationToken,
+                            settings.commandTimeout());
+                } catch (ProtocolDesynchronizedError beforeSend) {
+                    // 发送前的非横幅残留：还没写出本次请求，读类操作可以清空后重发。
                     if (retrySafe && recoveries < settings.desyncRecoveryLimit()) {
                         recoveries++;
                         recoverFromDesync(operation, cancellationToken);
                         continue;
                     }
-                    throw new ProtocolDesynchronizedError(operation, deviceKey,
-                            "发送前接收缓冲残留 " + inbox.size() + " 字节："
-                                    + Hex.of(inbox.peek(inbox.size())));
+                    throw beforeSend;
                 }
-
-                byte[] raw = transmitAndReceive(request, operation, cancellationToken);
                 ResponseCheck check = ResponseParser.check(request, raw);
                 if (check.isOk()) {
                     return check;
@@ -189,6 +198,7 @@ public final class ProtocolSession implements AutoCloseable {
         requireOpen(operation);
         operationLock.lock();
         try {
+            prepareInbox(operation, CancellationToken.none());
             writeBytes(frame.toWire(), operation);
         } finally {
             operationLock.unlock();
@@ -215,7 +225,29 @@ public final class ProtocolSession implements AutoCloseable {
         }
         operationLock.lock();
         try {
+            prepareInbox(operation, CancellationToken.none());
             writeBytes(payload, operation);
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /**
+     * 丢掉已经到达的字节，不写出任何帧。
+     *
+     * <p>官方空闲循环不读 SFR {@code 0x0100}。设备仍约每 100 ms 广播横幅；长时间不读
+     * 会让驱动缓冲溢出。这里只排空已经在缓冲里的完整横幅，留下未完成的横幅前缀，
+     * 让下一次命令能把它收齐。不发送探活。</p>
+     */
+    public void discardPending(String operation) {
+        requireOpen(operation);
+        operationLock.lock();
+        try {
+            pullImmediate(operation, CancellationToken.none());
+            skipCompleteBanners();
+            if (inbox.size() > 0 && !inboxIsBannerPrefix()) {
+                clearInboxOnly();
+            }
         } finally {
             operationLock.unlock();
         }
@@ -247,16 +279,40 @@ public final class ProtocolSession implements AutoCloseable {
      */
     public java.util.Optional<ResponseCheck> awaitAckOrIgnore(Frame request, String operation,
                                                               CancellationToken token) {
+        return awaitAckOrIgnore(request, operation, token, settings.commandTimeout());
+    }
+
+    /**
+     * 同 {@link #awaitAckOrIgnore(Frame, String, CancellationToken)}，但只等待
+     * {@code maxWait}。
+     *
+     * <p>显示设置帧（{@code setXy}/{@code setSize}/{@code setColors}）在厂商源码里只写
+     * 不读。用完整命令超时去等它们，会把下一条横幅当成失步并在填充动作发出前断开。</p>
+     */
+    public java.util.Optional<ResponseCheck> awaitAckOrIgnore(Frame request, String operation,
+                                                              CancellationToken token,
+                                                              Duration maxWait) {
         Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(maxWait, "maxWait");
+        if (maxWait.isNegative() || maxWait.isZero()) {
+            throw new space.firok.moli.usb.api.error.InvalidArgumentError(operation, deviceKey,
+                    "maxWait 必须为正");
+        }
         requireOpen(operation);
         CancellationToken cancellationToken = CancellationToken.requireNonNull(token);
         operationLock.lock();
         try {
             byte[] raw;
             try {
-                raw = transmitAndReceive(request, operation, cancellationToken);
+                raw = transmitAndReceive(request, operation, cancellationToken, maxWait);
             } catch (TimeoutError noAck) {
-                clearInboxOnly();
+                // 横幅前缀要留给下一次读取收齐。清掉它的话，仍在途的后半段会变成
+                // 无法识别的残留。非横幅残片则仍是失步。
+                if (inbox.size() > 0 && !inboxIsBannerPrefix()) {
+                    byte[] stale = inbox.takeAll();
+                    throw new ProtocolDesynchronizedError(operation, deviceKey,
+                            "等待回执超时，且缓冲里有非横幅残留 " + Hex.of(stale));
+                }
                 return java.util.Optional.empty();
             }
             ResponseCheck check = ResponseParser.check(request, raw);
@@ -268,6 +324,44 @@ public final class ProtocolSession implements AutoCloseable {
                 throw new ProtocolDesynchronizedError(operation, deviceKey, check.detail());
             }
             return java.util.Optional.of(check);
+        } finally {
+            operationLock.unlock();
+        }
+    }
+
+    /** Wait for the actual display action, not just a display-class response. */
+    public void requireDisplayAction(Frame request, String operation, CancellationToken token) {
+        ResponseCheck result = exchange(request, operation, token, true);
+        if (result.responseFrame().data0() != request.data0()) {
+            throw new ProtocolDesynchronizedError(operation, deviceKey,
+                    "显示回执未确认请求动作 " + request.hex());
+        }
+    }
+
+    /** Owns the wire from region setup through the last payload byte. */
+    public void displayTransaction(List<Frame> setups, Frame action, List<Frame> data, String operation) {
+        var token = CancellationToken.none();
+        operationLock.lock();
+        try {
+            requireOpen(operation);
+            prepareInbox(operation, token);
+            for (Frame setup : setups) writeBytes(setup.toWire(), operation);
+            writeBytes(action.toWire(), operation);
+            byte[] raw = receiveCommand(action, operation, token, settings.commandTimeout(), setups);
+            ResponseCheck check = ResponseParser.check(action, raw);
+            if (!check.isOk() || check.responseFrame().data0() != action.data0()) {
+                throw new ProtocolDesynchronizedError(operation, deviceKey,
+                        "显示回执未确认请求动作 " + action.hex() + "：" + Hex.of(raw));
+            }
+            if (!data.isEmpty()) {
+                byte[] payload = new byte[data.size() * Frame.LENGTH];
+                int offset = 0;
+                for (Frame frame : data) {
+                    System.arraycopy(frame.toWire(), 0, payload, offset, Frame.LENGTH);
+                    offset += Frame.LENGTH;
+                }
+                writeBytes(payload, operation);
+            }
         } finally {
             operationLock.unlock();
         }
@@ -306,7 +400,8 @@ public final class ProtocolSession implements AutoCloseable {
                     continue;
                 }
                 writeBytes(HandshakeCodec.encodeChallenge(), "handshake");
-                ConfirmResult confirm = awaitConfirm(deadline, token);
+                ConfirmResult confirm = awaitConfirm(
+                        System.nanoTime() + settings.handshakeTimeout().toNanos(), token);
                 if (confirm.confirmed()) {
                     protocolVersion = banner.getAsInt();
                     return;
@@ -401,45 +496,153 @@ public final class ProtocolSession implements AutoCloseable {
 
     // ------------------------------------------------------------ 请求-响应
 
-    private byte[] transmitAndReceive(Frame request, String operation, CancellationToken token) {
+    /**
+     * 写出请求并收齐 6 字节响应。
+     *
+     * <p>已经在缓冲里的 {@code \0MSNxx} 横幅会被跳过；横幅真前缀留在 {@link #inbox}，
+     * 不粘进返回的帧。只有尾巴不是横幅前缀时，才把多出的字节交回解析器判失步。</p>
+     */
+    private byte[] transmitAndReceive(Frame request, String operation, CancellationToken token,
+                                      Duration timeout) {
+        prepareInbox(operation, token);
         writeBytes(request.toWire(), operation);
 
-        long deadline = System.nanoTime() + settings.commandTimeout().toNanos();
-        while (inbox.size() < Frame.LENGTH) {
+        return receiveCommand(request, operation, token, timeout, List.of());
+    }
+
+    private void skipUnsolicited(List<Frame> setups) {
+        for (;;) {
+            skipCompleteBanners();
+            if (inbox.size() < Frame.LENGTH) return;
+            byte[] head = inbox.peek(Frame.LENGTH);
+            if (setups.stream().noneMatch(f -> f.command() == (head[0] & 0xff)
+                    && f.subcommand() == (head[1] & 0xff))) return;
+            inbox.consume(Frame.LENGTH);
+        }
+    }
+
+    private byte[] receiveCommand(Frame request, String operation, CancellationToken token,
+                                  Duration timeout, List<Frame> setups) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
             token.throwIfCancelled(operation, deviceKey);
-            long remainingNanos = deadline - System.nanoTime();
-            if (remainingNanos <= 0) {
-                int partial = inbox.size();
-                if (partial == 0) {
-                    throw new TimeoutError(operation, deviceKey,
-                            "在 " + settings.commandTimeout().toMillis() + " ms 内未收到响应"
-                                    + "（请求 " + request.hex() + "）");
+            skipUnsolicited(setups);
+            if (inboxIsBannerPrefix()) {
+                if (!readUntil(deadline, token, operation, request)) {
+                    throw timeoutWaiting(operation, request, timeout);
                 }
-                byte[] raw = inbox.takeAll();
-                return raw;
+                continue;
             }
-            int wanted = Frame.LENGTH - inbox.size();
-            byte[] chunk = readOnce(remainingNanos, token, operation, false);
-            if (chunk == null) {
-                throw new DisconnectedError(operation, deviceKey,
-                        "等待响应时传输断开（请求 " + request.hex() + "）");
+            if (inbox.size() >= Frame.LENGTH) {
+                byte[] frame = inbox.take(Frame.LENGTH);
+                pullImmediate(operation, token);
+                skipUnsolicited(setups);
+                if (inbox.size() > 0 && !inboxIsBannerPrefix()) {
+                    byte[] tail = inbox.takeAll();
+                    byte[] combined = new byte[frame.length + tail.length];
+                    System.arraycopy(frame, 0, combined, 0, frame.length);
+                    System.arraycopy(tail, 0, combined, frame.length, tail.length);
+                    return combined;
+                }
+                return frame;
             }
-            if (chunk.length > 0) {
-                inbox.append(chunk);
+            if (!readUntil(deadline, token, operation, request)) {
+                if (inbox.size() == 0) {
+                    throw timeoutWaiting(operation, request, timeout);
+                }
+                return inbox.takeAll();
             }
         }
+    }
 
-        byte[] frame = inbox.take(Frame.LENGTH);
-
-        // 多出来的字节说明本轮响应后面还跟着别的数据：上一轮残留或设备主动推送。
-        byte[] residue = readOnce(0, token, operation, true);
-        if (residue != null && residue.length > 0) {
-            byte[] combined = new byte[frame.length + residue.length];
-            System.arraycopy(frame, 0, combined, 0, frame.length);
-            System.arraycopy(residue, 0, combined, frame.length, residue.length);
-            return combined;
+    /**
+     * 发送前处理接收缓冲：跳过完整横幅，把横幅前缀收齐，非横幅残留视为失步。
+     *
+     * <p>必须在写出下一帧之前做完。前缀还没收齐就发送，设备回显会粘在横幅后面，
+     * 下一次 6 字节切片就不再是命令响应。</p>
+     */
+    private void prepareInbox(String operation, CancellationToken token) {
+        pullImmediate(operation, token);
+        skipCompleteBanners();
+        if (inboxIsBannerPrefix()) {
+            long deadline = System.nanoTime() + BANNER_PREFIX_DRAIN.toNanos();
+            while (inboxIsBannerPrefix()) {
+                token.throwIfCancelled(operation, deviceKey);
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    throw new ProtocolDesynchronizedError(operation, deviceKey,
+                            "发送前收到未完成的横幅前缀 "
+                                    + Hex.of(inbox.peek(inbox.size()))
+                                    + "，不能在未分帧时发出下一命令");
+                }
+                byte[] chunk = readOnce(remaining, token, operation, false);
+                if (chunk == null) {
+                    throw new DisconnectedError(operation, deviceKey, "等待横幅结束时传输断开");
+                }
+                if (chunk.length > 0) {
+                    inbox.append(chunk);
+                }
+                skipCompleteBanners();
+            }
         }
-        return frame;
+        if (inbox.size() > 0) {
+            throw new ProtocolDesynchronizedError(operation, deviceKey,
+                    "发送前接收缓冲残留 " + inbox.size() + " 字节："
+                            + Hex.of(inbox.peek(inbox.size())));
+        }
+    }
+
+    private void skipCompleteBanners() {
+        while (inbox.size() >= Frame.LENGTH && HandshakeCodec.isBanner(inbox.peek(Frame.LENGTH))) {
+            inbox.consume(Frame.LENGTH);
+        }
+    }
+
+    private boolean inboxIsBannerPrefix() {
+        int size = inbox.size();
+        if (size <= 0 || size >= Frame.LENGTH) {
+            return false;
+        }
+        return HandshakeCodec.isBannerPrefix(inbox.peek(size), 0, size);
+    }
+
+    /** 把操作系统缓冲里已经到达的字节全部拉进 {@link #inbox}，不等待。 */
+    private void pullImmediate(String operation, CancellationToken token) {
+        for (int reads = 0; reads < MAX_IMMEDIATE_READS; reads++) {
+            byte[] extra = readOnce(0, token, operation, true);
+            if (extra == null) {
+                throw new DisconnectedError(operation, deviceKey, "读取残留时传输断开");
+            }
+            if (extra.length == 0) {
+                return;
+            }
+            inbox.append(extra);
+        }
+        // A live device may broadcast \\0MSNxx forever. The bounded drain keeps the
+        // worker responsive; callers still frame and skip the bytes already collected.
+    }
+
+    /** 在截止时间前再读一次。返回 false 表示已经超时且没有新字节。 */
+    private boolean readUntil(long deadlineNanos, CancellationToken token, String operation, Frame request) {
+        long remainingNanos = deadlineNanos - System.nanoTime();
+        if (remainingNanos <= 0) {
+            return false;
+        }
+        byte[] chunk = readOnce(remainingNanos, token, operation, false);
+        if (chunk == null) {
+            throw new DisconnectedError(operation, deviceKey,
+                    "等待响应时传输断开（请求 " + request.hex() + "）");
+        }
+        if (chunk.length == 0) {
+            return System.nanoTime() < deadlineNanos;
+        }
+        inbox.append(chunk);
+        return true;
+    }
+
+    private TimeoutError timeoutWaiting(String operation, Frame request, Duration timeout) {
+        return new TimeoutError(operation, deviceKey,
+                "在 " + timeout.toMillis() + " ms 内未收到响应（请求 " + request.hex() + "）");
     }
 
     /** 读取一次。返回 null 表示断开；返回空数组表示本次没读到数据（超时或立即返回）。 */

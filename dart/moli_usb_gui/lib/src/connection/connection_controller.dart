@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:space_firok_moli_usb_protocol/space_firok_moli_usb_protocol.dart';
 
 import '../transport/host_binding.dart';
+import '../content/link_loss.dart';
 import 'command_queue.dart';
 import 'panel_geometry.dart';
 
@@ -95,6 +96,13 @@ final class ConnectionController extends ChangeNotifier {
   MoliSession? _session;
   MoliDeviceApi? _device;
   CancelToken? _connectToken;
+  Future<void>? _connectInFlight;
+  Timer? _reconnectTimer;
+  int _reconnectGeneration = 0;
+  bool _reconnecting = false;
+  bool _disposed = false;
+  ({Object error, StackTrace stack})? _lastConnectFailure;
+  ({Object error, StackTrace stack})? get lastConnectFailure => _lastConnectFailure;
 
   ConnectionPhase get phase => _phase;
   List<DeviceCandidate> get candidates => List.unmodifiable(_candidates);
@@ -137,7 +145,8 @@ final class ConnectionController extends ChangeNotifier {
 
   bool get disconnectEnabled =>
       _phase == ConnectionPhase.connecting ||
-      _phase == ConnectionPhase.connected;
+      _phase == ConnectionPhase.connected ||
+      _reconnecting;
 
   DeviceCandidate? get selectedCandidate {
     final key = _selectedKey;
@@ -184,12 +193,17 @@ final class ConnectionController extends ChangeNotifier {
 
   void selectCandidate(String? transportKey) {
     if (controlsLocked) return;
+    if (_selectedKey != transportKey) {
+      _cancelReconnect();
+      _lockedCandidate = null;
+    }
     _selectedKey = transportKey;
     notifyListeners();
   }
 
   void selectProfile(String name) {
     if (controlsLocked) return;
+    if (_profileName != name) _cancelReconnect();
     _profileName = name;
     notifyListeners();
   }
@@ -225,7 +239,23 @@ final class ConnectionController extends ChangeNotifier {
   ///
   /// Refuses a second connect while a session exists. Yields once so the
   /// scaffold can paint 连接中 before the handshake runs.
-  Future<void> connect() async {
+  Future<void> connect() {
+    _cancelReconnect();
+    return _trackConnect();
+  }
+
+  Future<void> _trackConnect() {
+    final existing = _connectInFlight;
+    if (existing != null) return existing;
+    final run = _connectImpl();
+    _connectInFlight = run;
+    return run.whenComplete(() {
+      if (identical(_connectInFlight, run)) _connectInFlight = null;
+    });
+  }
+
+  Future<void> _connectImpl() async {
+    if (_disposed) return;
     if (_phase != ConnectionPhase.disconnected) {
       throw StateError('已有连接，拒绝再次连接（$_phase）');
     }
@@ -235,6 +265,7 @@ final class ConnectionController extends ChangeNotifier {
     }
     final profile = selectedProfile;
     final token = CancelToken();
+    _lastConnectFailure = null;
     _connectToken = token;
     _phase = ConnectionPhase.connecting;
     _statusText = '连接中';
@@ -247,7 +278,7 @@ final class ConnectionController extends ChangeNotifier {
     notifyListeners();
     await Future<void>.delayed(Duration.zero);
     if (token.isCancelled) {
-      _enterDisconnected(status: '已断开');
+      if (!_disposed) _enterDisconnected(status: '已断开');
       return;
     }
 
@@ -261,7 +292,7 @@ final class ConnectionController extends ChangeNotifier {
       );
       if (token.isCancelled || _phase == ConnectionPhase.disconnecting) {
         await session.disconnect();
-        _enterDisconnected(status: '已断开');
+        if (!_disposed) _enterDisconnected(status: '已断开');
         return;
       }
       final device = MoliDeviceApi(session);
@@ -286,11 +317,15 @@ final class ConnectionController extends ChangeNotifier {
       _appendLog('串口参数 ${session.appliedSettings}');
       _syncPoll();
       notifyListeners();
-    } on MoliException catch (error) {
+    } on MoliException catch (error, stack) {
+      if (_disposed) return;
+      _lastConnectFailure = (error: error, stack: stack);
       _enterDisconnectedFromError(error);
-    } catch (error) {
+    } catch (error, stack) {
+      if (_disposed) return;
+      _lastConnectFailure = (error: error, stack: stack);
       _appendLog('连接失败: $error');
-      _enterDisconnected(status: '已断开');
+      _enterDisconnected(status: '连接失败: $error');
     } finally {
       _connectToken = null;
     }
@@ -298,6 +333,12 @@ final class ConnectionController extends ChangeNotifier {
 
   /// Cancels an in-flight connect, or closes the live session.
   Future<void> disconnect() async {
+    final pending = _reconnecting;
+    _cancelReconnect();
+    if (pending && _phase == ConnectionPhase.disconnected) {
+      _enterDisconnected(status: '已断开');
+      return;
+    }
     if (_phase == ConnectionPhase.disconnected ||
         _phase == ConnectionPhase.disconnecting) {
       return;
@@ -307,6 +348,7 @@ final class ConnectionController extends ChangeNotifier {
       _phase = ConnectionPhase.disconnecting;
       _statusText = '断开中';
       notifyListeners();
+      await _connectInFlight;
       return;
     }
     _phase = ConnectionPhase.disconnecting;
@@ -333,7 +375,8 @@ final class ConnectionController extends ChangeNotifier {
   /// this queue. Callers must not submit another frame while this future is
   /// still running.
   Future<T> submit<T>(Future<T> Function(MoliDeviceApi device) action) {
-    return _queue.run(() => _deviceAction(action));
+    final expected = _device;
+    return _queue.run(() => _deviceAction(expected, action));
   }
 
   /// Like [submit], but returns null when the queue is already busy.
@@ -342,25 +385,119 @@ final class ConnectionController extends ChangeNotifier {
   /// content send or a capability command.
   Future<T>? trySubmit<T>(Future<T> Function(MoliDeviceApi device) action) {
     if (_phase != ConnectionPhase.connected || _device == null) return null;
-    return _queue.tryRun(() => _deviceAction(action));
+    final expected = _device;
+    return _queue.tryRun(() => _deviceAction(expected, action));
   }
 
   Future<T> _deviceAction<T>(
+    MoliDeviceApi? device,
     Future<T> Function(MoliDeviceApi device) action,
   ) async {
-    final device = _device;
-    if (_phase != ConnectionPhase.connected || device == null) {
+    if (_phase != ConnectionPhase.connected || device == null ||
+        !identical(_device, device)) {
       throw const MoliException.disconnected(
         '没有已连接的会话',
         operation: 'submit',
       );
     }
     _submittedActions++;
-    return action(device);
+    try {
+      return await action(device);
+    } on MoliException catch (error) {
+      await _recoverLink(device.session, error);
+      rethrow;
+    }
+  }
+
+  void reportInputFailure(MoliSession expected, MoliException error) {
+    if (!_disposed && identical(_session, expected)) {
+      unawaited(_queue.run(() => _recoverLink(expected, error)));
+    }
+  }
+
+  Future<void> _recoverLink(MoliSession expected, MoliException error) async {
+    if (_disposed || _phase != ConnectionPhase.connected ||
+        !identical(_session, expected) ||
+        !shouldCloseForLinkLoss(error, portClosed: expected.port.isClosed,
+            sessionConnected: expected.isConnected)) return;
+    final target = _lockedCandidate;
+    final profile = selectedProfile;
+    final generation = ++_reconnectGeneration;
+    _phase = ConnectionPhase.disconnecting;
+    _statusText = '断开中';
+    notifyListeners();
+    try {
+      await expected.disconnect();
+    } catch (_) {
+      // Recover only by opening a fresh session, never by reusing this port.
+    }
+    if (_disposed) return;
+    if (target != null && generation == _reconnectGeneration) {
+      _reconnecting = true;
+      _scheduleReconnect(target, profile, generation, 0);
+    }
+    _enterDisconnectedFromError(error);
+  }
+
+  void _cancelReconnect() {
+    _reconnectGeneration++;
+    _reconnecting = false;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+  }
+
+  void _scheduleReconnect(DeviceCandidate target, DeviceProfile profile,
+      int generation, int attempt) {
+    if (attempt >= 4) {
+      _cancelReconnect();
+      notifyListeners();
+      return;
+    }
+    _reconnectTimer = Timer(Duration(seconds: 1 << attempt), () async {
+      bool valid() => !_disposed && generation == _reconnectGeneration &&
+          _phase == ConnectionPhase.disconnected &&
+          selectedProfile.name == profile.name &&
+          _selectedKey == target.transport.transportKey;
+      if (!valid()) return;
+      // Discover enumerates already granted Web Serial ports; never request one.
+      List<DeviceCandidate> found;
+      try {
+        found = await _manager.discover();
+      } catch (_) {
+        found = const [];
+      }
+      if (!valid()) return;
+      final old = target.transport;
+      for (final candidate in found) {
+        final next = candidate.transport;
+        if (next.transportKey != old.transportKey || next.kind != old.kind) continue;
+        if (next.usb?.vendorId != old.usb?.vendorId ||
+            next.usb?.productId != old.usb?.productId ||
+            next.usb?.serialNumber != old.usb?.serialNumber) {
+          _cancelReconnect();
+          notifyListeners();
+          return;
+        }
+        if (candidate.isOpenable && !candidate.isBusy) {
+          _candidates = found;
+          await _trackConnect();
+          if (_disposed || generation != _reconnectGeneration) return;
+          if (_phase == ConnectionPhase.connected) {
+            _cancelReconnect();
+            return;
+          }
+        }
+        break;
+      }
+      if (valid()) _scheduleReconnect(target, profile, generation, attempt + 1);
+    });
   }
 
   @override
   void dispose() {
+    _disposed = true;
+    _cancelReconnect();
+    _connectToken?.cancel('已关闭');
     _poll?.cancel();
     unawaited(_portSub?.cancel() ?? Future<void>.value());
     _queue.close();
@@ -376,17 +513,18 @@ final class ConnectionController extends ChangeNotifier {
   Future<void> _refreshNow() async {
     try {
       final found = await _manager.discover();
+      if (_disposed) return;
       _applyCandidates(found);
     } on MoliException catch (error) {
       _logException(error);
     } catch (error) {
       _appendLog('刷新失败: $error');
     }
-    notifyListeners();
+    if (!_disposed) notifyListeners();
   }
 
   void _applyCandidates(List<DeviceCandidate> fresh) {
-    if (_phase != ConnectionPhase.disconnected && _selectedKey != null) {
+    if ((_reconnecting || _phase != ConnectionPhase.disconnected) && _selectedKey != null) {
       final stillThere = fresh.any(
         (candidate) => candidate.transport.transportKey == _selectedKey,
       );
@@ -423,6 +561,7 @@ final class ConnectionController extends ChangeNotifier {
     _orientations = const <int>[];
     _phase = ConnectionPhase.disconnected;
     _statusText = status;
+    _geometryWarning = null;
     _syncPoll();
     notifyListeners();
   }
@@ -434,6 +573,13 @@ final class ConnectionController extends ChangeNotifier {
   /// Appends one line to the on-screen log.
   void appendLog(String message) {
     _appendLog(message);
+    notifyListeners();
+  }
+
+  /// Clears only the on-screen history; the session is left untouched.
+  void clearLog() {
+    if (_log.isEmpty) return;
+    _log.clear();
     notifyListeners();
   }
 

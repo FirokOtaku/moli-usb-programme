@@ -13,7 +13,7 @@ import java.util.List;
 /**
  * SFR 自描述表解析测试。
  *
- * <p>表项格式（spec/msu2-wire-protocol.md「SFR」）：名称 NUL、单位 NUL、family、
+ * <p>表项格式（spec/msu2-wire-protocol.md「SFR」）：名称 NUL、单位 NUL、family NUL、
  * family 决定长度的数据。family 2/4 的长度语义仍有缺陷，因此解析失败一律报畸形，
  * 不做猜测性截断。</p>
  */
@@ -30,6 +30,7 @@ class SfrTableParserTest {
             offset = putString(table, offset, entry.name());
             offset = putString(table, offset, entry.unit());
             table[offset++] = (byte) entry.family();
+            table[offset++] = 0;
             for (byte b : entry.data()) {
                 table[offset++] = b;
             }
@@ -127,7 +128,8 @@ class SfrTableParserTest {
         // 用长名称把条目推到表尾，使其声明的 31 字节数据必然越界。
         int offset = putString(table, 0, "X".repeat(240));
         offset = putString(table, offset, "u");
-        table[offset] = 0x60 | 31;
+        table[offset++] = (byte) (0x60 | 31);
+        table[offset] = 0;
         assertThrows(MalformedResponseError.class, () -> SfrTableParser.parse(table));
     }
 
@@ -149,8 +151,47 @@ class SfrTableParserTest {
         byte[] table = new byte[TABLE_LENGTH];
         int offset = putString(table, 0, "X");
         offset = putString(table, offset, "u");
-        table[offset] = (byte) 0xA0; // 种类 5
+        table[offset++] = (byte) 0xA0; // 种类 5
+        table[offset] = 0;
         assertThrows(MalformedResponseError.class, () -> SfrTableParser.parse(table));
+    }
+
+    @Test
+    @DisplayName("family 后的 NUL 不是地址；Lcd_X 地址 0 不会截断 Lcd_Y")
+    void familyNulIsNotTheAddress() {
+        byte[] table = new byte[TABLE_LENGTH];
+        int offset = 0;
+        offset = putFirmwareEntry(table, offset, "Lcd_X", 0x21, new byte[]{0x00});
+        offset = putFirmwareEntry(table, offset, "Lcd_Y", 0x21, new byte[]{0x01});
+        putFirmwareEntry(table, offset, "Flash_Info", 0x21, new byte[]{0x02});
+
+        List<SfrTableParser.Entry> entries = SfrTableParser.parse(table);
+        assertEquals(List.of("Lcd_X", "Lcd_Y", "Flash_Info"), entries.stream()
+                .map(SfrTableParser.Entry::name).toList());
+        assertEquals(0x00, entries.get(0).addressU8());
+        assertEquals(0x01, entries.get(1).addressU8());
+        assertEquals(1, entries.get(0).kind());
+        assertEquals(1, entries.get(1).kind());
+    }
+
+    @Test
+    @DisplayName("family 缺少结尾 NUL 时报畸形，不把结束符当成地址")
+    void missingFamilyNulIsMalformed() {
+        byte[] table = new byte[TABLE_LENGTH];
+        int offset = putString(table, 0, "Lcd_X");
+        offset = putString(table, offset, " ");
+        table[offset++] = 0x21;
+        table[offset] = 0x05;
+        assertThrows(MalformedResponseError.class, () -> SfrTableParser.parse(table));
+    }
+
+    private static int putFirmwareEntry(byte[] table, int offset, String name, int family, byte[] data) {
+        offset = putString(table, offset, name);
+        offset = putString(table, offset, " ");
+        table[offset++] = (byte) family;
+        table[offset++] = 0;
+        System.arraycopy(data, 0, table, offset, data.length);
+        return offset + data.length;
     }
 
     @Test

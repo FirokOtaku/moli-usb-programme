@@ -7,8 +7,9 @@ import java.util.List;
  * 编解码层：SFR 自描述表解析。
  *
  * <p>规范（spec/msu2-wire-protocol.md「SFR」）：源码从 u8 地址 {@code 0x0100} 起读取
- * 256 字节自描述表，每项依次为 NUL 结尾的名称、NUL 结尾的单位、1 字节 family 和
- * family 决定长度的数据。family 高 3 位含义：</p>
+ * 256 字节自描述表。每项依次为 NUL 结尾的名称、NUL 结尾的单位、NUL 结尾的 family
+ * （只用第一个字节）和 family 决定长度的数据。family 后面的 {@code 00} 是字段
+ * 结束符，不是地址。family 高 3 位含义：</p>
  *
  * <ul>
  *   <li>{@code 0}：u8 SFR，数据是 16 位地址；低 5 位为元素个数；</li>
@@ -105,6 +106,12 @@ public final class SfrTableParser {
                         "SfrTableParser.parse", null, "条目 " + name + " 缺少 family 字节");
             }
             int family = table[offset] & 0xFF;
+            offset++;
+            if (offset >= TABLE_LENGTH || (table[offset] & 0xFF) != 0) {
+                throw new space.firok.moli.usb.api.error.MalformedResponseError(
+                        "SfrTableParser.parse", null,
+                        "条目 " + name + " 的 family 缺少结尾 NUL");
+            }
             offset++;
             int kind = (family >>> 5) & 0x07;
             int count = family & 0x1F;

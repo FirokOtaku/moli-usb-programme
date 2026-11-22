@@ -156,6 +156,10 @@ _Outcome _open(LibserialportWorkerRequest request) {
     } else {
       config.setFlowControl(SerialPortFlowControl.none);
     }
+    // pySerial's defaults assert DTR and, when RTS is not handshake-driven,
+    // assert RTS. Do not inherit modem-line levels from a prior COM client.
+    config.dtr = SerialPortDtr.on;
+    if (!request.rtscts) config.rts = SerialPortRts.on;
     port.config = config;
   } on SerialPortError catch (error) {
     port.close();

@@ -35,8 +35,10 @@ PanelGeometry resolvePanelGeometry({
     width: fallback.width,
     height: fallback.height,
     usedProfileFallback: true,
-    warning:
-        '设备报告的分辨率无效（${reportedWidth}x$reportedHeight），'
-        '已改用配置 ${profile.name} 的 ${fallback.width}x${fallback.height}',
+    warning: reportedWidth == 0 && reportedHeight == 0
+        ? '自描述表没有给出 Lcd_X/Lcd_Y，已改用配置 ${profile.name} 的'
+            ' ${fallback.width}x${fallback.height}'
+        : '设备报告的屏幕尺寸为 ${reportedWidth}x$reportedHeight，'
+            '已改用配置 ${profile.name} 的 ${fallback.width}x${fallback.height}',
   );
 }

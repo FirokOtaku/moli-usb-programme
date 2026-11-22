@@ -269,11 +269,47 @@ final class ScratchCodec {
 /// Encodes the streaming write of RGB565 pixel data through the scratch
 /// buffer: setXy/setSize (caller), action 0x07, staged 0x04 frames, action
 /// 0x08 with the batch length, action 0x09 at the end.
+///
+/// The caller writes `0x04` / `0x08` / `0x09` without reading a response.
+/// `Write_LCD_Screen_fast1` does the same in one `ser.write`.
 final class PixelStreamEncoder {
   PixelStreamEncoder(this._display, this._scratch);
 
   final DisplayCodec _display;
   final ScratchCodec _scratch;
+
+  /// MINI V1.0 mirror format: default scratch word, exceptions, then commit.
+  List<Frame> encodeMiniCompactStream(List<int> pixelBytes) {
+    if (pixelBytes.isEmpty || pixelBytes.length.isOdd) {
+      throw const MoliException.invalidArgument('invalid RGB565 byte count');
+    }
+    final frames = <Frame>[_display.beginStream()];
+    for (var offset = 0; offset < pixelBytes.length; offset += 256) {
+      final length = (pixelBytes.length - offset).clamp(0, 256);
+      final bytes = List<int>.filled(256, 0xff);
+      bytes.setRange(0, length, pixelBytes, offset);
+      // A hex key keeps the four-byte value independent of Web bitwise width.
+      final words = List.generate(64, (i) => bytes.sublist(i * 4, i * 4 + 4));
+      if (length == 256) {
+        final counts = <String, int>{};
+        final keys = words.map((bytes) => bytes.join(',')).toList();
+        for (final key in keys) {
+          counts.update(key, (n) => n + 1, ifAbsent: () => 1);
+        }
+        final common = counts.keys.reduce((a, b) => counts[a]! >= counts[b]! ? a : b);
+        final value = words[keys.indexOf(common)];
+        frames.add(Frame(command: 2, subcommand: 4, data0: value[0],
+            data1: value[1], data2: value[2], data3: value[3]));
+        for (var i = 0; i < 64; i++) {
+          if (keys[i] != common) frames.add(_scratch.write(i, words[i]));
+        }
+      } else {
+        frames.addAll(_scratch.writeChunk(bytes));
+      }
+      frames.add(_display.commitStaged(length));
+    }
+    return frames;
+  }
 
   /// Builds all frames for one streaming write of [pixels] (RGB565, big-endian
   /// per pixel, high byte first).
@@ -281,9 +317,9 @@ final class PixelStreamEncoder {
   /// The caller is responsible for setXy/setSize and for the panel bounds
   /// check; this encoder only produces the wire frames.
   List<Frame> encodeStream(List<int> pixelBytes) {
-    if (pixelBytes.isEmpty) {
+    if (pixelBytes.isEmpty || pixelBytes.length.isOdd) {
       throw MoliException.invalidArgument(
-        'pixel data must not be empty',
+        'pixel data must contain a whole number of RGB565 pixels',
         operation: 'PixelStreamEncoder.encodeStream',
       );
     }
@@ -293,9 +329,11 @@ final class PixelStreamEncoder {
     while (offset < pixelBytes.length) {
       final end = (offset + ScratchCodec.scratchSize)
           .clamp(0, pixelBytes.length);
-      final chunk = pixelBytes.sublist(offset, end);
+      final length = end - offset;
+      final chunk = List<int>.filled(ScratchCodec.scratchSize, 0xff)
+        ..setRange(0, length, pixelBytes, offset);
       frames.addAll(_scratch.writeChunk(chunk));
-      frames.add(_display.commitStaged(chunk.length));
+      frames.add(_display.commitStaged(length));
       offset = end;
     }
     frames.add(_display.waitTransferDone());

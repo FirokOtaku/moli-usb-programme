@@ -56,6 +56,44 @@ class RleCodecTest {
         }
 
         @Test
+        @DisplayName("128 像素块与 MSN_compaction 逐字节一致")
+        void matchesMsnCompactionBlock() {
+            int green = 0x07E0;
+            int blue = 0x001F;
+            int[] pixels = new int[128];
+            int index = 0;
+            for (int pair = 0; pair < 4; pair++) {
+                for (int i = 0; i < 15; i++) {
+                    pixels[index++] = RED;
+                }
+                for (int i = 0; i < 15; i++) {
+                    pixels[index++] = green;
+                }
+            }
+            for (int i = 0; i < 4; i++) {
+                pixels[index++] = blue;
+            }
+            for (int i = 0; i < 4; i++) {
+                pixels[index++] = WHITE;
+            }
+            List<Frame> frames = RleCodec.encode(pixels);
+            assertEquals(5, frames.size());
+            byte[] expected = new byte[] {
+                    0x09, (byte) 0xFF, (byte) 0xF8, 0x00, 0x07, (byte) 0xE0,
+                    0x09, (byte) 0xFF, (byte) 0xF8, 0x00, 0x07, (byte) 0xE0,
+                    0x09, (byte) 0xFF, (byte) 0xF8, 0x00, 0x07, (byte) 0xE0,
+                    0x09, (byte) 0xFF, (byte) 0xF8, 0x00, 0x07, (byte) 0xE0,
+                    0x09, 0x44, 0x00, 0x1F, (byte) 0xFF, (byte) 0xFF
+            };
+            byte[] actual = new byte[expected.length];
+            for (int i = 0; i < frames.size(); i++) {
+                System.arraycopy(frames.get(i).toWire(), 0, actual, i * Frame.LENGTH, Frame.LENGTH);
+            }
+            assertArrayEquals(expected, actual);
+            assertEquals(128, pixelsIn(frames));
+        }
+
+        @Test
         @DisplayName("解码往返：任意长度都能还原原始像素")
         void decodeRoundTrip() {
             int[] pixels = new int[300];
@@ -87,8 +125,8 @@ class RleCodecTest {
             int[] pixels = repeat(RED, 127);
             List<Frame> frames = RleCodec.encode(pixels);
             assertEquals(127, pixelsIn(frames));
-            // 全同色时每个 run 只能是 15 像素，单块需要 ceil(127/15)=9 帧。
-            assertEquals(9, frames.size());
+            // 与 MSN_compaction 相同：15+15 配对，120 像素 4 帧，余 7 像素 1 帧。
+            assertEquals(5, frames.size());
         }
 
         @Test
@@ -97,8 +135,8 @@ class RleCodecTest {
             int[] pixels = repeat(RED, 129);
             List<Frame> frames = RleCodec.encode(pixels);
             assertEquals(129, pixelsIn(frames));
-            // 第一块 128 像素 9 帧，第二块 1 像素 1 帧。
-            assertEquals(10, frames.size());
+            // 第一块 128 像素 5 帧（4×30 + 8），第二块 1 像素 1 帧。
+            assertEquals(6, frames.size());
             Frame tail = frames.getLast();
             assertEquals(1, (tail.subcommand() >>> 4) & 0x0F);
             assertEquals(0, tail.subcommand() & 0x0F);
@@ -109,8 +147,8 @@ class RleCodecTest {
         void exactlyTwoBlocks() {
             List<Frame> frames = RleCodec.encode(repeat(RED, 256));
             assertEquals(256, pixelsIn(frames));
-            // 每块 128 像素 9 帧。
-            assertEquals(18, frames.size());
+            // 每块 128 像素 5 帧，两块不串在一起。
+            assertEquals(10, frames.size());
         }
     }
 

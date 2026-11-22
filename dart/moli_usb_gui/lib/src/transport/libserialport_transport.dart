@@ -284,12 +284,15 @@ final class _LibserialportPort implements TransportPort {
       _ensureOpen();
       final left = deadline.difference(DateTime.now());
       if (left <= Duration.zero) {
-        throw const MoliException.timeout(
-          '写入超时',
+        // A timeout can leave an unknown prefix on the wire. Do not reuse
+        // the session or try the frame again after this error.
+        throw MoliException.disconnected(
+          '写入超时（已接受 $offset/${data.length} 字节）',
           operation: 'write',
         );
       }
-      final sliceMs = left.inMilliseconds.clamp(1, 50);
+      // A 256-byte 8N1 chunk needs ~134 ms at MINI's 19200 baud.
+      final sliceMs = left.inMilliseconds.clamp(1, 350);
       final end = offset + 256 < data.length ? offset + 256 : data.length;
       final result = await _rpc(
         LibserialportWorkerRequest(
@@ -307,7 +310,12 @@ final class _LibserialportPort implements TransportPort {
           operation: 'write',
         );
       }
-      if (written == 0) continue;
+      if (written == 0) {
+        throw MoliException.disconnected(
+          '串口写超时（已确认写入 $offset/${data.length} 字节；当前块进度未知）',
+          operation: 'write',
+        );
+      }
       offset += written;
     }
   }

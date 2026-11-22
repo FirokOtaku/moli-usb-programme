@@ -382,6 +382,56 @@ class ProtocolSessionTest {
                         SfrCodec.readU8(0x0123), "read", CancellationToken.none(), true));
             }
         }
+
+        @Test
+        @DisplayName("7 字节是 6 字节回显加横幅前缀 00，byte 5 仍是寄存器值")
+        void sevenByteResponseIsFramePlusBannerPrefix() {
+            FakeTransport transport = new FakeTransport("COM70");
+            transport.script(BANNER);
+            transport.respondWith(frame -> {
+                if (Arrays.equals(frame, CONFIRM)) {
+                    return CONFIRM.clone();
+                }
+                byte[] echo = frame.clone();
+                echo[5] = (byte) 0xA0;
+                return concat(echo, new byte[]{0x00});
+            });
+            try (ProtocolSession session = openSession(transport, fastSettings())) {
+                var check = session.exchange(SfrCodec.readU8(0x0123), "read",
+                        CancellationToken.none(), false);
+                assertTrue(check.isOk());
+                assertEquals(0xA0, check.u8AtByte5());
+                assertEquals(6, check.raw().length);
+            }
+        }
+
+        @Test
+        @DisplayName("11 字节是 6 字节回显加 5 字节横幅前缀，收齐后下一命令仍对齐")
+        void elevenByteResponseIsFramePlusBannerPrefix() {
+            FakeTransport transport = new FakeTransport("COM71");
+            transport.script(BANNER);
+            transport.respondWith(frame -> {
+                if (Arrays.equals(frame, CONFIRM)) {
+                    return CONFIRM.clone();
+                }
+                byte[] echo = frame.clone();
+                echo[5] = (byte) 0x50;
+                return concat(echo, new byte[]{0x00, 0x4D, 0x53, 0x4E, 0x30});
+            });
+            try (ProtocolSession session = openSession(transport, fastSettings())) {
+                var first = session.exchange(SfrCodec.readU8(0x0100), "read",
+                        CancellationToken.none(), false);
+                assertTrue(first.isOk());
+                assertEquals(0x50, first.u8AtByte5());
+                assertEquals(6, first.raw().length);
+                // 横幅还差最后一字节。实机上它已在途；这里在下一命令前补上。
+                transport.script(new byte[]{0x31});
+                var second = session.exchange(SfrCodec.readU8(0x0101), "read",
+                        CancellationToken.none(), false);
+                assertTrue(second.isOk());
+                assertEquals(0x50, second.u8AtByte5());
+            }
+        }
     }
 
     @Nested

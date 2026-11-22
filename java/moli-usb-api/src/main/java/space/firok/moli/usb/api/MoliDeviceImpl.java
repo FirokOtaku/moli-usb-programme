@@ -2,7 +2,6 @@ package space.firok.moli.usb.api;
 
 import space.firok.moli.usb.api.codec.AdcCodec;
 import space.firok.moli.usb.api.codec.AdcKeyDetector;
-import space.firok.moli.usb.api.codec.Commands;
 import space.firok.moli.usb.api.codec.DisplayCodec;
 import space.firok.moli.usb.api.codec.FlashCodec;
 import space.firok.moli.usb.api.codec.Frame;
@@ -89,7 +88,13 @@ final class MoliDeviceImpl implements MoliDevice {
         boolean established = false;
         try {
             DeviceProfile profile = options.profile();
-            ProbeResult probe = probeSelfDescription(session, options, candidate);
+            // The PRO demo initializes direction on startup. Require evidence the
+            // command parser is alive, rather than accepting a challenge echo alone.
+            if (DeviceProfile.PRO.equals(profile.name())) {
+                session.requireDisplayAction(DisplayCodec.setOrientation(0), "initializeDisplay", token);
+            }
+            ProbeResult probe = probeSelfDescription(session, options, token);
+            token.throwIfCancelled("open", session.deviceKey());
 
             DeviceInfo info = new DeviceInfo(
                     session.protocolVersion(),
@@ -194,10 +199,10 @@ final class MoliDeviceImpl implements MoliDevice {
         Objects.requireNonNull(color, "color");
         requireDisplay("fillRect");
         requireWithinDisplay(rect, "fillRect");
-        dispatch(DisplayCodec.setXy(rect.x(), rect.y()), "fillRect");
-        dispatch(DisplayCodec.setSize(rect.width(), rect.height()), "fillRect");
-        dispatch(DisplayCodec.setColors(color.value(), color.value()), "fillRect");
-        dispatch(DisplayCodec.fillCurrent(color.value()), "fillRect");
+        session.displayTransaction(List.of(DisplayCodec.setXy(rect.x(), rect.y()),
+                        DisplayCodec.setSize(rect.width(), rect.height()),
+                        DisplayCodec.setColors(color.value(), color.value())),
+                DisplayCodec.fillCurrent(color.value()), List.of(), "fillRect");
     }
 
     @Override
@@ -230,11 +235,7 @@ final class MoliDeviceImpl implements MoliDevice {
                     "像素数量必须等于 " + expected + "（实际 " + pixels.length + "）");
         }
         byte[] wire = PixelStreamCodec.toWireBytes(pixels);
-        List<Frame> frames = new ArrayList<>();
-        frames.add(DisplayCodec.setXy(rect.x(), rect.y()));
-        frames.add(DisplayCodec.setSize(rect.width(), rect.height()));
-        frames.addAll(PixelStreamCodec.encodeStream(wire));
-        dispatchAll(frames, "streamImage");
+        writeImage(rect, PixelStreamCodec.encodeStream(wire), "streamImage");
     }
 
     @Override
@@ -255,11 +256,27 @@ final class MoliDeviceImpl implements MoliDevice {
                     "RLE 最坏情况需要 " + worstCase + " 帧，超过给定上界 " + maxFrames
                             + "；请改用 streamImage 未压缩路径或提高上界");
         }
-        List<Frame> frames = new ArrayList<>();
-        frames.add(DisplayCodec.setXy(rect.x(), rect.y()));
-        frames.add(DisplayCodec.setSize(rect.width(), rect.height()));
-        frames.addAll(PixelStreamCodec.encodeRleStream(pixels, maxFrames));
-        dispatchAll(frames, "streamImageRle");
+        writeImage(rect, PixelStreamCodec.encodeRleStream(pixels, maxFrames), "streamImageRle");
+    }
+
+    @Override
+    public void streamImageCompact(Rect rect, int[] pixels) {
+        if (!DeviceProfile.MINI.equals(profile.name())) {
+            streamImageRle(rect, pixels, 0);
+            return;
+        }
+        requireDisplay("streamImageCompact");
+        requireWithinDisplay(rect, "streamImageCompact");
+        if (pixels.length != (long) rect.width() * rect.height()) {
+            throw new InvalidArgumentError("streamImageCompact", id.toString(), "像素数量与区域不符");
+        }
+        writeImage(rect, PixelStreamCodec.encodeMiniCompactStream(pixels), "streamImageCompact");
+    }
+
+    private void writeImage(Rect rect, List<Frame> frames, String operation) {
+        session.displayTransaction(List.of(DisplayCodec.setXy(rect.x(), rect.y()),
+                DisplayCodec.setSize(rect.width(), rect.height())), frames.getFirst(),
+                frames.subList(1, frames.size()), operation);
     }
 
     // ----------------------------------------------------------------- 存储
@@ -352,6 +369,11 @@ final class MoliDeviceImpl implements MoliDevice {
     public void probeLink() {
         session.exchange(SfrCodec.readU8(SfrTableParser.TABLE_ADDRESS), "probeLink",
                 CancellationToken.none(), true);
+    }
+
+    @Override
+    public void discardPending() {
+        session.discardPending("discardPending");
     }
 
     /** MINI 按键的 ADC 通道；规范记为「旧版演示轮询通道 9」，仍需实机确认。 */
@@ -483,48 +505,7 @@ final class MoliDeviceImpl implements MoliDevice {
 
     /** 发送一帧并等待确认；用于需要回执的单个操作。 */
     private void dispatch(Frame request, String operation) {
-        session.exchange(request, operation, CancellationToken.none(), false);
-    }
-
-    /**
-     * 发送一串帧。
-     *
-     * <p>规范尚未确认显示动作的回执语义（spec/verification.md P1），因此显示动作走
-     * 「尽力确认」：收到响应就必须是完整且对应的帧，未收到响应不视为失败。写存储这类
-     * 已明确需要回执的操作仍走严格校验。这是本库唯一一处对超时宽容的地方，等实机
-     * 确认后应改为严格模式。</p>
-     */
-    private void dispatchAll(List<Frame> frames, String operation) {
-        List<Frame> silentBatch = new ArrayList<>();
-        try {
-            for (Frame frame : frames) {
-                if (isBulkDataFrame(frame)) {
-                    // 暂存区与 RLE 数据帧是批量载荷：真实设备不会逐帧回执，
-                    // 按帧等待确认会退化成每帧一个超时。
-                    silentBatch.add(frame);
-                    continue;
-                }
-                if (!silentBatch.isEmpty()) {
-                    session.sendAll(silentBatch, operation);
-                    silentBatch.clear();
-                }
-                if (frame.command() == Commands.DISPLAY) {
-                    session.awaitAckOrIgnore(frame, operation, CancellationToken.none());
-                } else {
-                    session.exchange(frame, operation, CancellationToken.none(), false);
-                }
-            }
-            if (!silentBatch.isEmpty()) {
-                session.sendAll(silentBatch, operation);
-            }
-        } finally {
-            silentBatch.clear();
-        }
-    }
-
-    /** 批量载荷：暂存区写入与 RLE 数据块。 */
-    private static boolean isBulkDataFrame(Frame frame) {
-        return frame.command() == Commands.SCRATCH || frame.command() == Commands.RLE;
+        session.exchange(request, operation, CancellationToken.none(), true);
     }
 
     /** 写类操作：要求回显匹配，收到不一致立即失败。 */
@@ -572,7 +553,7 @@ final class MoliDeviceImpl implements MoliDevice {
     }
 
     private static ProbeResult probeSelfDescription(ProtocolSession session, MoliOptions options,
-                                                    DeviceCandidate candidate) {
+                                                    CancellationToken token) {
         Map<String, DeviceInfo.SfrEntry> entries = new LinkedHashMap<>();
         Optional<String> uid = Optional.empty();
         int width = 0;
@@ -585,7 +566,7 @@ final class MoliDeviceImpl implements MoliDevice {
 
         byte[] table;
         try {
-            table = readSfrTable(session, candidate);
+            table = readSfrTable(session, token);
         } catch (RuntimeException probeFailed) {
             if (probeFailed instanceof DisconnectedError disconnected) {
                 throw disconnected;
@@ -607,19 +588,19 @@ final class MoliDeviceImpl implements MoliDevice {
         uid = entries.containsKey("MSN_UID")
                 ? Optional.of(asciiOf(entries.get("MSN_UID").data()))
                 : Optional.empty();
-        width = scalarOf(session, entries, "Lcd_X");
-        height = scalarOf(session, entries, "Lcd_Y");
+        width = scalarOf(session, entries, "Lcd_X", token);
+        height = scalarOf(session, entries, "Lcd_Y", token);
         storage = parseFlashInfo(entries.get("Flash_Info"));
         return new ProbeResult(uid, width, height, storage, entries);
     }
 
-    private static byte[] readSfrTable(ProtocolSession session, DeviceCandidate candidate) {
+    private static byte[] readSfrTable(ProtocolSession session, CancellationToken token) {
         byte[] table = new byte[SfrTableParser.TABLE_LENGTH];
         // 自描述表用 u8 SFR 读，每次只能取一个字节。
         for (int i = 0; i < SfrTableParser.TABLE_LENGTH; i++) {
             Frame request = SfrCodec.readU8(SfrTableParser.TABLE_ADDRESS + i);
             var check = session.exchange(request, "probeSelfDescription",
-                    CancellationToken.none(), true);
+                    token, true);
             table[i] = (byte) check.u8AtByte5();
             if (i == 0 && table[0] == 0) {
                 break;
@@ -647,7 +628,7 @@ final class MoliDeviceImpl implements MoliDevice {
     }
 
     private static int scalarOf(ProtocolSession session, Map<String, DeviceInfo.SfrEntry> entries,
-                                String name) {
+                                String name, CancellationToken token) {
         DeviceInfo.SfrEntry entry = entries.get(name);
         if (entry == null || entry.data().isEmpty()) {
             return 0;
@@ -659,13 +640,13 @@ final class MoliDeviceImpl implements MoliDevice {
                 int address = ((entry.data().get(0) << 8)
                         | (entry.data().size() > 1 ? entry.data().get(1) : 0)) & 0xFFFF;
                 var check = session.exchange(SfrCodec.readU8(address), "probeSelfDescription",
-                        CancellationToken.none(), true);
+                        token, true);
                 yield check.u8AtByte5();
             }
             // u16 SFR：数据是 8 位地址，同样需要再读。
             case 1 -> {
                 var check = session.exchange(SfrCodec.readU16(entry.data().get(0)),
-                        "probeSelfDescription", CancellationToken.none(), true);
+                        "probeSelfDescription", token, true);
                 yield check.u16AtBytes4And5();
             }
             default -> 0;

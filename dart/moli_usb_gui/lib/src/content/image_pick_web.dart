@@ -21,7 +21,7 @@ Future<PickedImage?> pickImageFileImpl() {
   }).toJS;
   web.document.body?.append(input);
   input.click();
-  return completer.future.whenComplete(input.remove);
+  return completer.future.whenComplete(() => input.remove());
 }
 
 Future<void> _readSelected(

@@ -191,6 +191,11 @@ class DeviceControlModelTest {
         }
 
         @Override
+        public void discardPending() {
+            calls.add("drain");
+        }
+
+        @Override
         public void fillRect(Rect rect, Rgb565 color) {
             throw new UnsupportedOperationException();
         }

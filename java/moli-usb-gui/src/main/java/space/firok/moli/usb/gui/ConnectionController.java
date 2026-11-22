@@ -7,10 +7,15 @@ import space.firok.moli.usb.api.domain.DeviceInfo;
 import space.firok.moli.usb.api.domain.DeviceProfile;
 import space.firok.moli.usb.api.domain.DisplayGeometry;
 import space.firok.moli.usb.api.error.MoliUsbException;
+import space.firok.moli.usb.api.error.TimeoutError;
+import space.firok.moli.usb.api.session.CancellationToken;
 
 import java.time.Duration;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -33,8 +38,8 @@ import java.util.function.Consumer;
  *
  * <p>画面发送走 {@link #submitDevice(java.util.function.Consumer)}，与握手共用这一条
  * worker，避免并发命令错配响应。调用方拿不到 {@link MoliDevice}，也不能在
- * JavaFX 线程上使用它。断链异常按类型关闭会话并解锁选择。空闲探活也走这条
- * worker，但 worker 正忙时直接跳过，不把探活排进队列。</p>
+ * JavaFX 线程上使用它。断链异常按类型关闭会话并解锁选择。空闲时只排空已经到达的
+ * 横幅，不发送 SFR 探活；worker 正忙时直接跳过，不把排空排进队列。</p>
  */
 public final class ConnectionController implements AutoCloseable {
 
@@ -45,6 +50,7 @@ public final class ConnectionController implements AutoCloseable {
     public static final Duration DEFAULT_PROBE_INTERVAL = Duration.ofSeconds(2);
 
     private static final int MAX_LOG_LINES = 200;
+    private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT);
     static final String WORKER_NAME = "moli-usb-gui-io";
 
     private enum IdleKind {
@@ -70,6 +76,12 @@ public final class ConnectionController implements AutoCloseable {
     private String idleReason;
     private int sessionEpoch;
     private boolean cancelConnect;
+    private CancellationToken connectToken;
+    private ScheduledFuture<?> reconnectTask;
+    private DeviceCandidate reconnectCandidate;
+    private DeviceProfile reconnectProfile;
+    private int reconnectAttempts;
+    private static final int MAX_RECONNECT_ATTEMPTS = 4;
 
     private List<DeviceCandidate> candidates = List.of();
     private DeviceCandidate selected;
@@ -147,6 +159,7 @@ public final class ConnectionController implements AutoCloseable {
             if (closed || state != SessionState.DISCONNECTED) {
                 return;
             }
+            if (!Objects.equals(selected, candidate)) cancelReconnectLocked();
             selected = candidate;
         }
         publish();
@@ -159,6 +172,7 @@ public final class ConnectionController implements AutoCloseable {
             if (closed || state != SessionState.DISCONNECTED) {
                 return;
             }
+            if (!this.profile.name().equals(profile.name())) cancelReconnectLocked();
             this.profile = profile;
         }
         publish();
@@ -178,24 +192,67 @@ public final class ConnectionController implements AutoCloseable {
             } else if (selected == null) {
                 addLogLocked("拒绝连接：未选择串口");
             } else {
-                sessionEpoch++;
-                int epoch = sessionEpoch;
-                cancelConnect = false;
-                state = SessionState.CONNECTING;
-                warning = null;
-                DeviceCandidate candidate = selected;
-                DeviceProfile chosen = profile;
-                // 与 disconnect 同锁提交，避免断开任务排到 open 前面，或第二次 open 插队。
-                executeOnWorker(() -> {
-                    try {
-                        openOnWorker(epoch, candidate, chosen);
-                    } catch (RuntimeException error) {
-                        failUnexpected(epoch, error);
-                    }
-                });
+                cancelReconnectLocked();
+                startOpenLocked(selected, profile);
             }
         }
         publish();
+    }
+
+    private void startOpenLocked(DeviceCandidate candidate, DeviceProfile chosen) {
+        int epoch = ++sessionEpoch;
+        cancelConnect = false;
+        CancellationToken token = connectToken = new CancellationToken();
+        state = SessionState.CONNECTING;
+        warning = null;
+        executeOnWorker(() -> openOnWorker(epoch, candidate, chosen, token));
+    }
+
+    private void cancelReconnectLocked() {
+        if (reconnectTask != null) reconnectTask.cancel(false);
+        reconnectTask = null;
+        reconnectCandidate = null;
+        reconnectProfile = null;
+        reconnectAttempts = 0;
+    }
+
+    private static boolean samePort(DeviceCandidate a, DeviceCandidate b) {
+        return a != null && b != null && a.id().transportKey().equals(b.id().transportKey())
+                && a.usbVendorId().equals(b.usbVendorId()) && a.usbProductId().equals(b.usbProductId())
+                && a.usbSerialNumber().equals(b.usbSerialNumber());
+    }
+
+    private void scheduleReconnectLocked() {
+        if (reconnectCandidate == null || closed || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            cancelReconnectLocked();
+            return;
+        }
+        int epoch = sessionEpoch;
+        DeviceCandidate target = reconnectCandidate;
+        reconnectTask = worker.schedule(() -> {
+            List<DeviceCandidate> found;
+            try {
+                found = gateway.listCandidates();
+            } catch (RuntimeException error) {
+                found = List.of();
+            }
+            DeviceCandidate present = found.stream().filter(c -> samePort(target, c)).findFirst().orElse(null);
+            synchronized (monitor) {
+                if (closed || epoch != sessionEpoch || reconnectCandidate != target
+                        || state != SessionState.DISCONNECTED) return;
+                reconnectTask = null;
+                if (found.stream().anyMatch(c -> c.id().transportKey().equals(target.id().transportKey())
+                        && !samePort(target, c))) {
+                    cancelReconnectLocked();
+                } else if (present != null && present.available()) {
+                    selected = present;
+                    startOpenLocked(present, reconnectProfile);
+                } else {
+                    scheduleReconnectLocked();
+                }
+            }
+            publish();
+        }, 1L << reconnectAttempts++, TimeUnit.SECONDS);
     }
 
     /**
@@ -204,10 +261,21 @@ public final class ConnectionController implements AutoCloseable {
      */
     public void disconnect() {
         synchronized (monitor) {
-            if (closed || state == SessionState.DISCONNECTED || state == SessionState.DISCONNECTING) {
+            if (closed) return;
+            boolean pending = reconnectCandidate != null;
+            cancelReconnectLocked();
+            if (state == SessionState.DISCONNECTED) {
+                if (pending) {
+                    becomeDisconnectedLocked(IdleKind.CLEAN, null);
+                    executeOnWorker(this::publish);
+                }
                 return;
             }
+            if (state == SessionState.DISCONNECTING) return;
             cancelConnect = true;
+            if (connectToken != null) {
+                connectToken.cancel("用户断开");
+            }
             state = SessionState.DISCONNECTING;
             int epoch = sessionEpoch;
             executeOnWorker(() -> finishDisconnect(epoch));
@@ -300,8 +368,8 @@ public final class ConnectionController implements AutoCloseable {
     }
 
     /**
-     * 已连接后大约每 {@code interval} 探活一次。定时器不在设备 worker 上跑；
-     * 这一拍若设备正忙就跳过，不把 {@code probeLink} 排进队列。
+     * 已连接后大约每 {@code interval} 排空一次已经到达的横幅。定时器不在设备
+     * worker 上跑；这一拍若设备正忙就跳过。不发送 SFR {@code 0x0100}。
      */
     public void startIdleProbe(Duration interval) {
         Objects.requireNonNull(interval, "interval");
@@ -371,8 +439,8 @@ public final class ConnectionController implements AutoCloseable {
     }
 
     /**
-     * 空闲时提交一次 {@link MoliDevice#probeLink()}。画面发送、能力命令或 worker
-     * 上已有任务时返回 false，且不入队。
+     * 空闲时排空已经到达的字节，不调用 {@link MoliDevice#probeLink()}。画面发送、
+     * 能力命令或 worker 上已有任务时返回 false，且不入队。排空超时不断开。
      */
     boolean probeTick() {
         synchronized (monitor) {
@@ -384,11 +452,36 @@ public final class ConnectionController implements AutoCloseable {
             }
             int epoch = sessionEpoch;
             try {
-                executeOnWorker(() -> runDeviceAction(epoch, MoliDevice::probeLink));
+                executeOnWorker(() -> drainOnWorker(epoch));
             } catch (IllegalStateException rejected) {
                 return false;
             }
             return true;
+        }
+    }
+
+    private void drainOnWorker(int epoch) {
+        assertOnWorker();
+        MoliDevice current;
+        synchronized (monitor) {
+            if (closed || sessionEpoch != epoch || state != SessionState.CONNECTED || device == null) {
+                return;
+            }
+            current = device;
+        }
+        try {
+            current.discardPending();
+        } catch (TimeoutError ignored) {
+            // 官方空闲不探活。一次读超时不能拆掉还开着的口。
+        } catch (MoliUsbException error) {
+            if (LinkErrors.isLinkLoss(error)) {
+                failLink(epoch, error);
+            } else {
+                logUnlocked(ErrorTexts.describe(error));
+            }
+        } catch (RuntimeException error) {
+            logUnlocked("排空接收缓冲失败：" + error.getClass().getSimpleName()
+                    + (error.getMessage() == null ? "" : "：" + error.getMessage()));
         }
     }
 
@@ -412,7 +505,9 @@ public final class ConnectionController implements AutoCloseable {
                 return;
             }
             closed = true;
+            cancelReconnectLocked();
             cancelConnect = true;
+            if (connectToken != null) connectToken.cancel("窗口关闭");
             pendingPoll = pollTask;
             pollTask = null;
             probe = probeScheduler;
@@ -527,7 +622,8 @@ public final class ConnectionController implements AutoCloseable {
         }
     }
 
-    private void openOnWorker(int epoch, DeviceCandidate candidate, DeviceProfile chosen) {
+    private void openOnWorker(int epoch, DeviceCandidate candidate, DeviceProfile chosen,
+                              CancellationToken token) {
         assertOnWorker();
         if (abortIfCancelled(epoch)) {
             publish();
@@ -535,7 +631,7 @@ public final class ConnectionController implements AutoCloseable {
         }
         MoliDevice opened;
         try {
-            opened = gateway.open(candidate, chosen);
+            opened = gateway.open(candidate, chosen, token);
         } catch (MoliUsbException error) {
             fail(epoch, error);
             return;
@@ -567,15 +663,23 @@ public final class ConnectionController implements AutoCloseable {
         String nextWarning = null;
         if (width == 0 || height == 0) {
             Optional<DisplayGeometry> geometry = chosen.display();
+            boolean named = info.reportedEntries().containsKey("Lcd_X")
+                    && info.reportedEntries().containsKey("Lcd_Y");
             if (geometry.isPresent()) {
                 width = geometry.get().width();
                 height = geometry.get().height();
                 fallback = true;
-                nextWarning = "设备报告的屏幕尺寸为 " + info.screenWidth() + "x" + info.screenHeight()
-                        + "，已改用 profile " + chosen.name() + " 的显示几何 " + width + "x" + height;
+                nextWarning = named
+                        ? "设备报告的屏幕尺寸为 " + info.screenWidth() + "x" + info.screenHeight()
+                                + "，已改用 profile " + chosen.name() + " 的显示几何 " + width + "x" + height
+                        : "自描述表没有给出 Lcd_X/Lcd_Y，已改用 profile " + chosen.name()
+                                + " 的显示几何 " + width + "x" + height;
             } else {
-                nextWarning = "设备报告的屏幕尺寸为 " + info.screenWidth() + "x" + info.screenHeight()
-                        + "，profile " + chosen.name() + " 没有可用的显示几何，不猜测画面尺寸";
+                nextWarning = named
+                        ? "设备报告的屏幕尺寸为 " + info.screenWidth() + "x" + info.screenHeight()
+                                + "，profile " + chosen.name() + " 没有可用的显示几何，不猜测画面尺寸"
+                        : "自描述表没有给出 Lcd_X/Lcd_Y，profile " + chosen.name()
+                                + " 没有可用的显示几何，不猜测画面尺寸";
             }
         }
         DeviceCapabilities nextCapabilities = opened.capabilities();
@@ -600,6 +704,7 @@ public final class ConnectionController implements AutoCloseable {
                     addLogLocked(nextWarning);
                 }
                 state = SessionState.CONNECTED;
+                cancelReconnectLocked();
                 idleKind = IdleKind.NEVER;
                 idleReason = null;
                 publishNeeded = true;
@@ -661,12 +766,18 @@ public final class ConnectionController implements AutoCloseable {
     }
 
     private void fail(int epoch, MoliUsbException error) {
+        System.getLogger(ConnectionController.class.getName()).log(System.Logger.Level.DEBUG, "连接未完成", error);
         synchronized (monitor) {
             if (closed || sessionEpoch != epoch) {
                 return;
             }
             device = null;
-            becomeDisconnectedLocked(IdleKind.FAILED, ErrorTexts.describe(error));
+            if (cancelConnect || (connectToken != null && connectToken.isCancelled())) {
+                becomeDisconnectedLocked(IdleKind.CLEAN, "用户取消连接");
+            } else {
+                becomeDisconnectedLocked(IdleKind.FAILED, ErrorTexts.describe(error));
+                scheduleReconnectLocked();
+            }
         }
         publish();
     }
@@ -701,12 +812,15 @@ public final class ConnectionController implements AutoCloseable {
         assertOnWorker();
         MoliDevice toClose;
         synchronized (monitor) {
-            if (closed || sessionEpoch != epoch || state == SessionState.DISCONNECTED) {
+            if (closed || sessionEpoch != epoch || state != SessionState.CONNECTED) {
                 return;
             }
             toClose = device;
             device = null;
+            reconnectCandidate = selected;
+            reconnectProfile = profile;
             becomeDisconnectedLocked(IdleKind.FAILED, ErrorTexts.describe(error));
+            scheduleReconnectLocked();
         }
         closeQuietly(toClose);
         publish();
@@ -723,6 +837,7 @@ public final class ConnectionController implements AutoCloseable {
     }
 
     private void failUnexpected(int epoch, RuntimeException error) {
+        System.getLogger(ConnectionController.class.getName()).log(System.Logger.Level.WARNING, "连接失败", error);
         synchronized (monitor) {
             if (closed || sessionEpoch != epoch) {
                 return;
@@ -738,6 +853,7 @@ public final class ConnectionController implements AutoCloseable {
     private void becomeDisconnectedLocked(IdleKind kind, String reason) {
         state = SessionState.DISCONNECTED;
         cancelConnect = false;
+        connectToken = null;
         connectedUid = null;
         screenWidth = 0;
         screenHeight = 0;
@@ -803,8 +919,15 @@ public final class ConnectionController implements AutoCloseable {
         }
     }
 
+    /** 只清除界面历史，不改变连接或发布新的连接状态。 */
+    void clearLog() {
+        synchronized (monitor) {
+            logLines.clear();
+        }
+    }
+
     private void addLogLocked(String line) {
-        logLines.add(line);
+        logLines.add(LOG_TIME.format(LocalTime.now()) + " " + line);
         if (logLines.size() > MAX_LOG_LINES) {
             logLines.subList(0, logLines.size() - MAX_LOG_LINES).clear();
         }
@@ -816,7 +939,7 @@ public final class ConnectionController implements AutoCloseable {
                 state,
                 locked,
                 state == SessionState.DISCONNECTED && selected != null,
-                state == SessionState.CONNECTING || state == SessionState.CONNECTED,
+                state == SessionState.CONNECTING || state == SessionState.CONNECTED || reconnectCandidate != null,
                 candidates,
                 selected,
                 profile.name(),

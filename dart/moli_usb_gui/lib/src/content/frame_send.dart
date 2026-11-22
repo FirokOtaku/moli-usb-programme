@@ -7,7 +7,7 @@ import 'rgb565_convert.dart';
 ///
 /// The facade rejects the call when [RleCodec.worstCaseFrameCount] is larger,
 /// and the host then sends the same pixels uncompressed.
-const int kTwoColorRleFrameBudget = 8192;
+const int kTwoColorRleFrameBudget = 131072;
 
 /// Writes [frame] through the device facade. Does not open a port.
 Future<bool> sendOutgoingFrame(
@@ -24,29 +24,11 @@ Future<bool> sendOutgoingFrame(
     await device.fillRect(rect, color, token: token);
     return false;
   }
-  if (frame.delivery == PixelDelivery.uncompressed) {
-    await _sendUncompressed(device, rect, pixels, token);
+  if (frame.delivery == PixelDelivery.compact) {
+    await device.drawPixelsCompact(rect, pixels, token: token);
     return false;
   }
   return _sendTwoColor(device, rect, pixels, token);
-}
-
-Future<void> _sendUncompressed(
-  MoliDeviceApi device,
-  Rect rect,
-  List<Rgb565Color> pixels,
-  CancelToken token,
-) async {
-  final display = device.display;
-  if (rect.x == 0 &&
-      rect.y == 0 &&
-      rect.width == display.width &&
-      rect.height == display.height &&
-      pixels.length == display.width * display.height) {
-    await device.drawFrame(pixels, token: token);
-    return;
-  }
-  await device.drawPixels(rect, pixels, token: token);
 }
 
 /// Returns true when the RLE bound was exceeded and uncompressed was used.

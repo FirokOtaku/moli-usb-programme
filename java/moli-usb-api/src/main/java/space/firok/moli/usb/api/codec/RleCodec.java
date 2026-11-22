@@ -15,16 +15,17 @@ import java.util.List;
  * 09 (run_a << 4 | run_b) color_a_hi color_a_lo color_b_hi color_b_lo
  * }</pre>
  *
- * <p>每个 run 为 0..15 个 RGB565 像素，每 128 个像素构成一个编码块。厂商 C 函数存在
- * 三个缺陷，本实现全部修正：</p>
+ * <p>每个 run 为 0..15 个 RGB565 像素，每 128 个像素构成一个编码块。配对方式和
+ * {@code MSN_compaction} 一致：第一段即使已经取满 15 个像素，块内还有剩余像素时
+ * 仍继续编第二段（同色也会编成 {@code 15+15}）。厂商 C 函数另有三处缺陷，本实现修正：</p>
  *
  * <ol>
  *   <li>没有输出容量参数，无法防止最坏情况膨胀——本实现既可返回可增长的帧列表，也能
  *       接收调用方指定的安全上界 {@code maxFrames} 并在超出时失败；</li>
  *   <li>输入不足 128 像素的尾部不处理——本实现按实际长度收尾，用 {@code run_b = 0}
  *       关闭最后一个配对；</li>
- *   <li>{@code run_b == 0} 时读取未初始化的第二颜色——本实现显式把第二颜色设为
- *       第一颜色，解码方也不会从未定义的字节里取值。</li>
+ *   <li>块在第一段结束时 {@code run_b == 0}，C 函数会写出未初始化的第二颜色——本实现
+ *       把第二颜色设为第一颜色，解码方也不会从未定义的字节里取值。</li>
  * </ol>
  *
  * <p>最坏情况为逐像素交替，每帧 2 像素，即每块 64 帧；{@link #worstCaseFrameCount(int)}
@@ -118,7 +119,8 @@ public final class RleCodec {
             }
             int runB = 0;
             int colorB = colorA;
-            if (index < end && runA < MAX_RUN) {
+            // MSN_compaction 在第一段取满 15 之后，只要块内还有像素就继续编第二段。
+            if (index < end) {
                 colorB = colorAt(pixels, index);
                 runB = 1;
                 index++;

@@ -20,8 +20,9 @@ enum PixelDelivery {
   /// Uniform color. Prefer [MoliDeviceApi.fillRect].
   fill,
 
-  /// Photograph. Uncompressed [MoliDeviceApi.drawPixels] / [MoliDeviceApi.drawFrame].
-  uncompressed,
+  /// Photograph or live mirror. Official `MSN_compaction` via
+  /// [MoliDeviceApi.drawPixelsRle]. Never falls back to the 39KB uncompressed write.
+  compact,
 
   /// Text or clock. [MoliDeviceApi.drawPixelsRle], with an uncompressed fallback.
   rle,

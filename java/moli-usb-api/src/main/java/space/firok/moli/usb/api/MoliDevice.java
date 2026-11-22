@@ -118,6 +118,11 @@ public interface MoliDevice extends AutoCloseable {
      */
     void streamImageRle(Rect rect, int[] pixels, int maxFrames);
 
+    /** Streams host-rendered pixels using the selected device family's compact format. */
+    default void streamImageCompact(Rect rect, int[] pixels) {
+        streamImageRle(rect, pixels, 0);
+    }
+
     /** 读取外部存储的连续字节。地址越界抛 {@code OutOfBoundsError}。 */
     byte[] readStorage(long address, int length);
 
@@ -143,9 +148,18 @@ public interface MoliDevice extends AutoCloseable {
     /**
      * 空闲探活：经当前会话读一次库里已经在读的 SFR 地址，不改变像素、背光、方向或灯。
      *
-     * <p>不引入新的线协议操作码。传输断开、超时或协议失步按现有异常类型抛出。</p>
+     * <p>官方演示在空闲时不发这帧。上位机定时器不要调用它：设备正在吃像素流时，
+     * {@code 00 30 00 01 00 00} 会被当成像素，画面只刷出一条然后停住。传输断开、
+     * 超时或协议失步按现有异常类型抛出。</p>
      */
     void probeLink();
+
+    /**
+     * 排空已经到达的接收字节，不写出任何帧。
+     *
+     * <p>用来避免横幅把驱动缓冲撑满。不是探活，也不读 SFR。</p>
+     */
+    void discardPending();
 
     /** 关闭会话并释放设备占用。幂等。 */
     @Override

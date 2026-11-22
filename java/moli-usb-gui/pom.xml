@@ -2,8 +2,11 @@
 <!--
   MSU2 JavaFX 上位机：画面内容，以及按能力门控的方向、背光、RGB 灯和按键。
 
-  非模块化应用：没有 module-info.java。JavaFX 依赖放在 classpath 上，
-  由 javafx-maven-plugin 在 javafx:run 时放到 module path 并追加 add-modules。
+  非模块化应用：没有 module-info.java。JavaFX 依赖放在 classpath 上。
+  进程入口是 MoliUsbGuiMain，不继承 Application。直接启动 MoliUsbGuiApp 时，
+  JDK 发现主类继承 Application 且 javafx.graphics 不在模块路径上，会报
+  “缺少 JavaFX 运行时组件”，即使 javafx-controls 已经在依赖里。
+  javafx-maven-plugin 的 javafx:run 仍会把 JavaFX 放到 module path。
   不配置 GraalVM native-image。
 
   javafx-graphics 由 javafx-controls 传递引入，不重复声明。
@@ -85,7 +88,7 @@
                 <artifactId>javafx-maven-plugin</artifactId>
                 <version>${javafx.maven.plugin.version}</version>
                 <configuration>
-                    <mainClass>space.firok.moli.usb.gui.MoliUsbGuiApp</mainClass>
+                    <mainClass>space.firok.moli.usb.gui.MoliUsbGuiMain</mainClass>
                     <options>
                         <option>--enable-native-access=ALL-UNNAMED</option>
                         <option>--enable-native-access=javafx.graphics</option>

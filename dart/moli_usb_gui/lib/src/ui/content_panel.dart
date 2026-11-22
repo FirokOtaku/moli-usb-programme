@@ -102,7 +102,7 @@ class _ContentPanelState extends State<ContentPanel> {
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(
-                '当前串口为 19200 baud，整屏照片和桌面镜像发送会比较慢，界面仍可操作。',
+                '19200 是 MINI 的官方波特率。照片和镜像已压缩，复杂画面仍比 LITE/PRO 慢，界面可继续操作。',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: theme.colorScheme.tertiary,
                 ),

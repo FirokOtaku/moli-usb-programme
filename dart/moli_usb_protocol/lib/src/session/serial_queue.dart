@@ -12,6 +12,9 @@ final class SerialQueue {
   Future<void> _tail = Future<void>.value();
 
   bool _closed = false;
+  int _pending = 0;
+
+  bool get isBusy => _pending != 0;
 
   /// Whether [close] has been called.
   bool get isClosed => _closed;
@@ -27,6 +30,7 @@ final class SerialQueue {
       );
     }
     final completer = Completer<T>();
+    _pending++;
     _tail = _tail.then((_) async {
       try {
         completer.complete(await action());
@@ -34,6 +38,8 @@ final class SerialQueue {
         if (!completer.isCompleted) {
           completer.completeError(error, stackTrace);
         }
+      } finally {
+        _pending--;
       }
     });
     return completer.future;

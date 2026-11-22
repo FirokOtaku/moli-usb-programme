@@ -28,11 +28,13 @@ final class AdcCodec {
 ///
 /// Wire format (spec/msu2-wire-protocol.md):
 ///   09 (run_a << 4 | run_b) color_a_hi color_a_lo color_b_hi color_b_lo
-/// Each run is 0..15 pixels; every block encodes exactly 128 pixels. The
-/// vendor C function lacks an output-capacity parameter and does not handle
-/// tails shorter than 128 pixels — this implementation fixes both: tails are
-/// encoded with a zero-length second run, and every API takes an explicit
-/// output capacity or returns a bounded list.
+/// Each run is 0..15 pixels; every block encodes exactly 128 pixels. Pairing
+/// matches `MSN_compaction`: after a full run of 15, a second run is still
+/// encoded when pixels remain in the block (a solid span becomes 15+15).
+/// The vendor C function drops tails shorter than 128 pixels and writes an
+/// uninitialized second color when the block ends during the first run. This
+/// implementation encodes the tail with `run_b = 0` and sets that second
+/// color to the first color.
 abstract final class RleCodec {
   /// Pixels per RLE block.
   static const int pixelsPerBlock = 128;
@@ -84,11 +86,12 @@ abstract final class RleCodec {
         runA++;
         i++;
       }
-      // Second run: next different color, or a zero-length run to close the
-      // pair when the block or budget is exhausted.
+      // Second run even when run A already took 15 pixels, matching
+      // MSN_compaction. A zero-length run closes the pair only when the
+      // block ends during run A.
       var runB = 0;
       var colorB = colorA;
-      if (i < end && runA < 15) {
+      if (i < end) {
         colorB = pixels[i] & 0xFFFF;
         runB = 1;
         i++;

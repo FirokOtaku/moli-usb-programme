@@ -2,13 +2,17 @@ package space.firok.moli.usb.gui;
 
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuItem;
+import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TextArea;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -31,19 +35,20 @@ import java.time.Duration;
  *
  * <p>按钮处理只调用 {@link ConnectionController}、内容循环和能力控件。设备 IO 在
  * {@code moli-usb-gui-io} 上执行，不在 JavaFX 线程上调用 {@code MoliDevice}。</p>
+ *
+ * <p>进程入口是 {@link MoliUsbGuiMain}，不在本类上放 {@code main}。JDK 启动继承
+ * {@code Application} 的主类时，要求 {@code javafx.graphics} 在模块路径上；
+ * JavaFX 只在 classpath 时会报“缺少 JavaFX 运行时组件”。</p>
  */
 public final class MoliUsbGuiApp extends Application {
 
-    private static final String SLOW_BAUD_WARNING = "所选 profile 波特率为 19200，发送整帧图片或桌面镜像会比较慢";
+    private static final String SLOW_BAUD_WARNING =
+            "19200 是 MINI 的官方波特率。照片和镜像已压缩，复杂画面仍比 LITE/PRO 慢，界面可继续操作";
 
     private ConnectionController controller;
     private ContentPanel contentPanel;
     private CapabilityPanel capabilityPanel;
     private boolean applying;
-
-    public static void main(String[] args) {
-        launch(args);
-    }
 
     @Override
     public void start(Stage stage) {
@@ -93,9 +98,26 @@ public final class MoliUsbGuiApp extends Application {
         TextArea log = new TextArea();
         log.setEditable(false);
         log.setWrapText(true);
-        log.setPrefRowCount(6);
+        log.setMinHeight(0);
         log.setPromptText("连接、断开和发送失败会显示在这里");
         Label logTitle = new Label("日志");
+        logTitle.setLabelFor(log);
+        MenuItem copyLog = new MenuItem("复制");
+        copyLog.setOnAction(event -> log.copy());
+        MenuItem selectLog = new MenuItem("全选");
+        selectLog.setOnAction(event -> log.selectAll());
+        MenuItem clearLog = new MenuItem("清空");
+        clearLog.setOnAction(event -> {
+            controller.clearLog();
+            refreshLog(log);
+        });
+        ContextMenu logMenu = new ContextMenu(copyLog, selectLog, new SeparatorMenuItem(), clearLog);
+        logMenu.setOnShowing(event -> {
+            copyLog.setDisable(log.getSelection().getLength() == 0);
+            selectLog.setDisable(log.getLength() == 0);
+            clearLog.setDisable(log.getLength() == 0);
+        });
+        log.setContextMenu(logMenu);
         VBox bottom = new VBox(4, logTitle, log);
         bottom.setPadding(new Insets(0, 10, 10, 10));
         VBox.setVgrow(log, Priority.ALWAYS);
@@ -120,9 +142,14 @@ public final class MoliUsbGuiApp extends Application {
         root.setTop(top);
         root.setCenter(center);
         root.setBottom(bottom);
+        log.prefHeightProperty().bind(Bindings.createDoubleBinding(
+                () -> Math.clamp(root.getHeight() * 0.31, 120, 340), root.heightProperty()));
 
-        controller.setListener(snapshot -> apply(snapshot, devices, profiles, connect, disconnect, status,
-                geometryWarning, slowBaud, placeholder, placeholderBox, connectedBox, log));
+        controller.setListener(snapshot -> {
+            apply(snapshot, devices, profiles, connect, disconnect, status,
+                    geometryWarning, slowBaud, placeholder, placeholderBox, connectedBox);
+            refreshLog(log);
+        });
 
         devices.setOnAction(event -> {
             if (!applying) {
@@ -143,7 +170,7 @@ public final class MoliUsbGuiApp extends Application {
         });
 
         apply(controller.snapshot(), devices, profiles, connect, disconnect, status,
-                geometryWarning, slowBaud, placeholder, placeholderBox, connectedBox, log);
+                geometryWarning, slowBaud, placeholder, placeholderBox, connectedBox);
         controller.start();
 
         stage.setTitle("MSU2 屏幕助手");
@@ -176,8 +203,7 @@ public final class MoliUsbGuiApp extends Application {
                        Label slowBaud,
                        Label placeholder,
                        VBox placeholderBox,
-                       Parent connectedBox,
-                       TextArea log) {
+                       Parent connectedBox) {
         applying = true;
         try {
             devices.getItems().setAll(snapshot.candidates());
@@ -203,10 +229,18 @@ public final class MoliUsbGuiApp extends Application {
             placeholderBox.setManaged(!connected);
             contentPanel.applyConnection(snapshot);
             capabilityPanel.applyConnection(snapshot);
-            log.setText(String.join(System.lineSeparator(), snapshot.logLines()));
-            log.positionCaret(log.getLength());
         } finally {
             applying = false;
+        }
+    }
+
+    private void refreshLog(TextArea log) {
+        // A connection snapshot queued before clearing must not restore old entries.
+        String text = String.join("\n", controller.snapshot().logLines().reversed());
+        if (!text.equals(log.getText())) {
+            log.setText(text);
+            log.positionCaret(0);
+            log.setScrollTop(0);
         }
     }
 }

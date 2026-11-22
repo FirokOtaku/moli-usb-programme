@@ -13,7 +13,6 @@ import 'composed_frame.dart';
 import 'frame_send.dart';
 import 'image_decode.dart';
 import 'image_fit.dart';
-import 'link_loss.dart';
 import 'picked_image.dart';
 import 'rgb565_convert.dart';
 import 'scroll_window.dart';
@@ -104,8 +103,6 @@ final class ContentController extends ChangeNotifier {
   int _stripWidth = 0;
   int _scrollOffset = 0;
   bool _loggedRleFallback = false;
-  bool _closingForLoss = false;
-
   bool get cover => imageFit == ImageFit.cover;
 
   bool get mirrorCover => mirrorFit == ImageFit.cover;
@@ -132,7 +129,7 @@ final class ContentController extends ChangeNotifier {
     return _panel() == null;
   }
 
-  /// 19200 baud. Full-frame photos and desktop mirror are slow; the UI stays usable.
+  /// Official MINI rate is 19200. Photos and mirror are RLE, but a busy frame is still slower than LITE/PRO.
   bool get slowPhoto => _connection.selectedProfile.serial.baudRate == 19200;
 
   void selectMode(ContentMode next) {
@@ -397,10 +394,6 @@ final class ContentController extends ChangeNotifier {
           token.isCancelled) {
         return;
       }
-      if (_linkGone(error)) {
-        await _onLinkLost(error);
-        return;
-      }
       _connection.appendLog('${error.kind.label}: ${error.message}');
       statusMessage = error.message;
     } catch (error) {
@@ -497,7 +490,7 @@ final class ContentController extends ChangeNotifier {
         height: height,
         pixels: asColors(values),
       ),
-      delivery: PixelDelivery.uncompressed,
+      delivery: PixelDelivery.compact,
     );
   }
 
@@ -545,7 +538,7 @@ final class ContentController extends ChangeNotifier {
         height: height,
         pixels: asColors(values),
       ),
-      delivery: PixelDelivery.uncompressed,
+      delivery: PixelDelivery.compact,
     );
   }
 
@@ -636,37 +629,6 @@ final class ContentController extends ChangeNotifier {
       return null;
     }
     return (width, height);
-  }
-
-  bool _linkGone(MoliException error) {
-    final session = _connection.session;
-    return shouldCloseForLinkLoss(
-      error,
-      portClosed: session == null || session.port.isClosed,
-      sessionConnected: session != null && session.isConnected,
-    );
-  }
-
-  Future<void> _onLinkLost(MoliException error) async {
-    _stopLoops();
-    _cancelInFlight();
-    if (_closingForLoss || _disposed) return;
-    _closingForLoss = true;
-    statusMessage = '${error.kind.label}: ${error.message}';
-    _connection.appendLog('${error.kind.label}: ${error.message}');
-    try {
-      if (_connection.phase == ConnectionPhase.connected ||
-          _connection.phase == ConnectionPhase.connecting) {
-        await _connection.disconnect();
-      }
-    } catch (closeError) {
-      if (!_disposed) {
-        _connection.appendLog('断开失败: $closeError');
-      }
-    } finally {
-      _closingForLoss = false;
-      _notify();
-    }
   }
 
   void _notify() {

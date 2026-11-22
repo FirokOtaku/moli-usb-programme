@@ -270,10 +270,7 @@ final class MoliDeviceApi {
     Rgb565Color color, {
     CancelToken? token,
   }) async {
-    final geometry = session.displayGeometry;
-    rect.ensureWithin(geometry.width, geometry.height, operation: 'fillRect');
-    await session.setRegion(rect, token: token);
-    await session.fill(color, token: token);
+    await session.fillRect(rect, color, token: token);
   }
 
   /// Clears the whole panel to black.
@@ -316,9 +313,10 @@ final class MoliDeviceApi {
 
   /// Streams [pixels] into [rect] as two-color RLE frames.
   ///
-  /// The region is set the same way [drawPixels] does. Each following frame is
-  /// exactly what [RleCodec.encode] produces (command `0x09`); they are sent
-  /// through [MoliSession.request], the same path uncompressed frames use.
+  /// Same wire shape as `show_PC_Screen`: setXy/setSize, action `0x07`, then
+  /// one write of the command `0x09` frames from [RleCodec.encode]. Those
+  /// frames are not read. There is no action `0x08` and no trailing action
+  /// `0x09`.
   ///
   /// When [maxFrames] is greater than 0 and [RleCodec.worstCaseFrameCount]
   /// exceeds it, this throws [MoliErrorKind.invalidArgument] and sends nothing.
@@ -346,20 +344,21 @@ final class MoliDeviceApi {
         deviceId: id?.value,
       );
     }
-    rect.ensureWithin(
-      session.displayGeometry.width,
-      session.displayGeometry.height,
-      operation: 'drawPixelsRle',
-    );
-    await session.setRegion(rect, token: token);
     final values = List<int>.generate(
       pixels.length,
       (index) => pixels[index].value & 0xFFFF,
       growable: false,
     );
-    for (final frame in RleCodec.encode(values)) {
-      await session.request(frame, token: token);
+    await session.drawPixelsRle(rect, values, token: token);
+  }
+
+  /// Sends host raster content using the device family's compact format.
+  Future<void> drawPixelsCompact(Rect rect, List<Rgb565Color> pixels,
+      {CancelToken? token}) {
+    if (session.info?.profile.name == DeviceProfile.nameMini) {
+      return session.drawPixels(rect, pixels, token: token, miniCompact: true);
     }
+    return drawPixelsRle(rect, pixels, token: token);
   }
 
   /// Shows a color asset stored in device Flash at [page].
@@ -423,9 +422,15 @@ final class MoliDeviceApi {
   ///
   /// This is the SFR u8 read the session already implements
   /// ([SfrTableParser.tableAddress]). It uses no new opcode and does not
-  /// change pixels, backlight, orientation, or LEDs.
+  /// change pixels, backlight, orientation, or LEDs. Host idle timers must
+  /// not call it: official demos never poll `0x0100`, and a read during a
+  /// pixel stream is consumed as pixels.
   Future<int> probeLink({CancelToken? token}) =>
       session.readSfrU8(SfrTableParser.tableAddress, token: token);
+
+  /// Drops bytes already received. Does not write, including the idle SFR read.
+  Future<void> discardPending({CancelToken? token}) =>
+      session.discardPending(token: token);
 
   /// Input events, for devices with [DeviceCapabilities.keyInput] (MINI).
   Stream<InputEvent> get inputEvents => session.inputEvents;

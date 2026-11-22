@@ -95,9 +95,10 @@ final class SfrCodec {
 
 /// One entry of the 256-byte self-describing SFR table (address 0x0100..).
 ///
-/// Layout per spec: NUL-terminated name, NUL-terminated unit, 1 family byte
-/// whose high 3 bits determine the entry shape and low 5 bits the element
-/// count/length, then family-specific data.
+/// Layout per spec: NUL-terminated name, NUL-terminated unit, NUL-terminated
+/// family (only the first byte is used), then family-specific data. The `00`
+/// after the family byte is a terminator, not an address. Address 0 is a
+/// legal u16 SFR address (`Lcd_X` in MINI firmware V1.2).
 enum SfrEntryFamily {
   u8Register('u8', 0),
   u16Register('u16', 1),
@@ -194,6 +195,13 @@ final class SfrTableParser {
         );
       }
       final familyByte = table[offset];
+      offset += 1;
+      if (offset >= table.length || table[offset] != 0) {
+        throw MoliException.malformedResponse(
+          'SFR family of "$name" is missing its terminating NUL',
+          operation: 'SfrTableParser.parse',
+        );
+      }
       offset += 1;
       final family = SfrEntryFamily.fromBits(familyByte);
       if (family == null) {

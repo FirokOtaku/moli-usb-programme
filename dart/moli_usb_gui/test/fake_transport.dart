@@ -22,6 +22,9 @@ final class FakeHostPort implements TransportPort {
   /// When set, the next write throws this and clears it.
   MoliException? failWrite;
 
+  /// When set, the next [readAvailable] throws this and clears it.
+  MoliException? failReadAvailable;
+
   @override
   TransportPortDescriptor get descriptor => _descriptor;
 
@@ -77,7 +80,7 @@ final class FakeHostPort implements TransportPort {
       return;
     }
     if (bytes.length >= 2) {
-      _pending.addAll(<int>[bytes[0], bytes[1], 0, 0, 0, 0]);
+      _pending.addAll(<int>[bytes[0], bytes[1], bytes[0] == 2 ? bytes[2] : 0, 0, 0, 0]);
     }
   }
 
@@ -96,7 +99,14 @@ final class FakeHostPort implements TransportPort {
   }
 
   @override
-  Future<Uint8List> readAvailable() async => Uint8List(0);
+  Future<Uint8List> readAvailable() async {
+    final failure = failReadAvailable;
+    if (failure != null) {
+      failReadAvailable = null;
+      throw failure;
+    }
+    return Uint8List(0);
+  }
 
   @override
   Future<void> close() async {
@@ -115,7 +125,7 @@ final class FakeHostProvider implements TransportProvider {
 
   final String portKey;
   final String displayName;
-  final MoliException? failOpen;
+  MoliException? failOpen;
   final MoliException? failRead;
   final bool holdReads;
 

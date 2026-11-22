@@ -115,6 +115,29 @@ final class ScriptedDevice implements DeviceProvider {
         return out;
     }
 
+    void setSfr(int address, int value) {
+        for (DeviceState state : states.values()) {
+            state.sfr.put(address, value & 0xFF);
+        }
+    }
+
+    /** u16 SFR，地址是 8 位。{@code Lcd_X} 在实机上就是地址 0。 */
+    void setSfrU16(int address, int value) {
+        for (DeviceState state : states.values()) {
+            state.sfrU16.put(address & 0xFF, value & 0xFFFF);
+        }
+    }
+
+    /**
+     * 每条命令回显之后再追加的字节。实机上这是已经进入缓冲的 {@code \0MSNxx} 横幅
+     * 或其前缀；旧主机会把它粘进响应，自描述读取失败后屏幕尺寸停留在 0x0。
+     */
+    void setEchoTail(byte[] tail) {
+        this.echoTail = tail == null ? null : tail.clone();
+    }
+
+    private byte[] echoTail;
+
     void setFlashByte(int address, int value) {
         for (DeviceState state : states.values()) {
             state.flash.put(address, value & 0xFF);
@@ -139,6 +162,7 @@ final class ScriptedDevice implements DeviceProvider {
 
     private static final class DeviceState {
         final Map<Integer, Integer> sfr = new HashMap<>();
+        final Map<Integer, Integer> sfrU16 = new HashMap<>();
         final Map<Integer, Integer> flash = new HashMap<>();
         final List<ScriptedTransport> transports = new CopyOnWriteArrayList<>();
         volatile int keyChannel = 9;
@@ -215,11 +239,15 @@ final class ScriptedDevice implements DeviceProvider {
                 case 0x00 -> {
                     if (subcommand == 0x30 && (frame[2] & 0xFF) == 0x00) {
                         int addressValue = ((frame[3] & 0xFF) << 8) | (frame[4] & 0xFF);
-                        // 自描述表区域一律返回 0，表示「设备未提供自描述」。
                         int value = state.sfr.getOrDefault(addressValue, 0);
-                        emit(new byte[]{0x00, 0x30, 0x00, frame[3], frame[4], (byte) value});
+                        emitResponse(new byte[]{0x00, 0x30, 0x00, frame[3], frame[4], (byte) value});
+                    } else if (subcommand == 0x30 && (frame[2] & 0xFF) == 0x20) {
+                        int addressValue = frame[3] & 0xFF;
+                        int value = state.sfrU16.getOrDefault(addressValue, 0);
+                        emitResponse(new byte[]{0x00, 0x30, 0x20, frame[3],
+                                (byte) (value >>> 8), (byte) value});
                     } else {
-                        emit(frame);
+                        emitResponse(frame);
                     }
                 }
                 case 0x03 -> {
@@ -227,20 +255,39 @@ final class ScriptedDevice implements DeviceProvider {
                         int addressValue = ((frame[2] & 0xFF) << 16)
                                 | ((frame[3] & 0xFF) << 8) | (frame[4] & 0xFF);
                         int value = state.flash.getOrDefault(addressValue, 0xFF);
-                        emit(new byte[]{0x03, 0x00, frame[2], frame[3], frame[4], (byte) value});
+                        emitResponse(new byte[]{0x03, 0x00, frame[2], frame[3], frame[4], (byte) value});
                     } else {
-                        emit(frame);
+                        emitResponse(frame);
                     }
                 }
                 case 0x08 -> {
                     int sample = state.keySample;
-                    emit(new byte[]{0x08, frame[1], 0x00, 0x00,
+                    emitResponse(new byte[]{0x08, frame[1], 0x00, 0x00,
                             (byte) (sample >>> 8), (byte) sample});
                 }
                 // 0x04 暂存区与 0x09 RLE 数据块是批量载荷，真实设备不逐帧回执。
                 case 0x04, 0x09 -> {
                 }
-                default -> emit(frame);
+                case 0x02 -> {
+                    // action 0x08 / 0x09 在厂商源码里只写不读。回显它们会掩盖
+                    // 「主机还在等回执」的回归。
+                    if (subcommand == 0x03) {
+                        int action = frame[2] & 0xFF;
+                        if (action == 0x08 || action == 0x09) {
+                            break;
+                        }
+                    }
+                    emitResponse(frame);
+                }
+                default -> emitResponse(frame);
+            }
+        }
+
+        private void emitResponse(byte[] bytes) {
+            emit(bytes);
+            byte[] tail = echoTail;
+            if (tail != null && tail.length > 0) {
+                emit(tail);
             }
         }
 

@@ -8,6 +8,7 @@ import '../content/content_controller.dart';
 import '../transport/transport_factory.dart';
 import 'capability_panel.dart';
 import 'content_panel.dart';
+import 'log_panel.dart';
 
 class HostPage extends StatefulWidget {
   const HostPage({super.key, this.controller});
@@ -24,9 +25,6 @@ class _HostPageState extends State<HostPage> {
   late final ContentController _content;
   late final CapabilityController _controls;
   late final bool _ownsController;
-  final ScrollController _logScroll = ScrollController();
-  int _logLength = 0;
-
   @override
   void initState() {
     super.initState();
@@ -50,16 +48,7 @@ class _HostPageState extends State<HostPage> {
   }
 
   void _onChanged() {
-    if (!mounted) return;
-    final logLength = _controller.log.length;
-    final scrollLog = logLength != _logLength;
-    _logLength = logLength;
-    setState(() {});
-    if (!scrollLog) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_logScroll.hasClients) return;
-      _logScroll.jumpTo(_logScroll.position.maxScrollExtent);
-    });
+    if (mounted) setState(() {});
   }
 
   @override
@@ -70,18 +59,33 @@ class _HostPageState extends State<HostPage> {
     _controls.dispose();
     _content.dispose();
     if (_ownsController) _controller.dispose();
-    _logScroll.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) =>
+          _buildScaffold(context, constraints.maxHeight),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context, double height) {
     final controller = _controller;
     final theme = Theme.of(context);
+    final bodyHeight =
+        (height -
+                MediaQuery.paddingOf(context).top -
+                kToolbarHeight -
+                MediaQuery.viewInsetsOf(context).bottom)
+            .clamp(0.0, height);
+    // Use more space on desktop, without crowding the controls on short views.
+    final logHeight = (bodyHeight * 0.34).clamp(
+      0.0,
+      (bodyHeight - 400).clamp(56.0, 340.0),
+    );
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('MSU2 屏幕助手'),
-      ),
+      appBar: AppBar(title: const Text('MSU2 屏幕助手')),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -114,7 +118,8 @@ class _HostPageState extends State<HostPage> {
                   ),
                 ),
                 OutlinedButton(
-                  onPressed: controller.phase == ConnectionPhase.connecting ||
+                  onPressed:
+                      controller.phase == ConnectionPhase.connecting ||
                           controller.phase == ConnectionPhase.disconnecting
                       ? null
                       : () => unawaited(controller.refresh()),
@@ -122,7 +127,8 @@ class _HostPageState extends State<HostPage> {
                 ),
                 if (controller.canRequestPort)
                   OutlinedButton(
-                    onPressed: controller.phase == ConnectionPhase.connecting ||
+                    onPressed:
+                        controller.phase == ConnectionPhase.connecting ||
                             controller.phase == ConnectionPhase.disconnecting
                         ? null
                         : () => unawaited(controller.requestGrantedPort()),
@@ -177,7 +183,9 @@ class _HostPageState extends State<HostPage> {
               ),
             ),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 280),
+            constraints: BoxConstraints(
+              maxHeight: (bodyHeight * 0.30).clamp(0.0, 280.0),
+            ),
             child: SingleChildScrollView(
               child: CapabilityPanel(
                 connection: controller,
@@ -186,9 +194,18 @@ class _HostPageState extends State<HostPage> {
             ),
           ),
           Expanded(
-            child: ContentPanel(
-              connection: controller,
-              content: _content,
+            child: LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                primary: false,
+                child: SizedBox(
+                  // Keep controls reachable when the log shares a short view.
+                  height: constraints.maxHeight.clamp(300.0, double.infinity),
+                  child: ContentPanel(
+                    connection: controller,
+                    content: _content,
+                  ),
+                ),
+              ),
             ),
           ),
           if (controller.geometryWarning != null)
@@ -202,29 +219,10 @@ class _HostPageState extends State<HostPage> {
               ),
             ),
           SizedBox(
-            height: 180,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                border: Border(
-                  top: BorderSide(color: theme.dividerColor),
-                ),
-              ),
-              child: controller.log.isEmpty
-                  ? const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: Text('日志'),
-                    )
-                  : ListView.builder(
-                      controller: _logScroll,
-                      padding: const EdgeInsets.all(12),
-                      itemCount: controller.log.length,
-                      itemBuilder: (context, index) {
-                        return SelectableText(
-                          controller.log[index],
-                          style: theme.textTheme.bodySmall,
-                        );
-                      },
-                    ),
+            height: logHeight,
+            child: LogPanel(
+              lines: controller.log,
+              onClear: controller.clearLog,
             ),
           ),
         ],

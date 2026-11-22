@@ -43,6 +43,28 @@ final class HandshakeCodec {
     return (d0 - 0x30) * 10 + (d1 - 0x30);
   }
 
+  /// True when [bytes] is a complete `\0MSN` + two ASCII digits banner.
+  bool isBanner(Uint8List bytes) => tryParseBanner(bytes) != null;
+
+  /// True when [length] bytes at [offset] are a proper prefix of `\0MSNxx`.
+  ///
+  /// A real prefix is shorter than 6 bytes and matches `00 4D 53 4E` plus one
+  /// ASCII digit. The 7-byte and 11-byte reads seen on a live MINI are a
+  /// 6-byte command frame followed by this prefix, not a longer command.
+  bool isBannerPrefix(List<int> bytes, int offset, int length) {
+    if (length <= 0 || length >= 6) return false;
+    if (offset < 0 || offset + length > bytes.length) return false;
+    final limit = length < kMsnPrefix.length ? length : kMsnPrefix.length;
+    for (var i = 0; i < limit; i++) {
+      if (bytes[offset + i] != kMsnPrefix[i]) return false;
+    }
+    if (length >= 5) {
+      final digit = bytes[offset + 4];
+      return digit >= 0x30 && digit <= 0x39;
+    }
+    return true;
+  }
+
   /// Matches the `\0MSNCN` response frame expected after the challenge.
   bool isConfirmResponse(Uint8List bytes) {
     if (bytes.length < 6) return false;

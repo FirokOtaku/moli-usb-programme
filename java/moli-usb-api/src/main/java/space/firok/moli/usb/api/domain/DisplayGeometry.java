@@ -43,9 +43,13 @@ public record DisplayGeometry(
     /** 显示方向。数值对应显示动作 {@code 0x0A} 的 orientation 参数。 */
     public enum Orientation {
         NORMAL(0),
-        ROTATE_90(1),
-        ROTATE_180(2),
-        ROTATE_270(3);
+        /** @deprecated 已知机型没有 90° 方向的协议值。 */
+        @Deprecated
+        ROTATE_90(-1),
+        ROTATE_180(1),
+        /** @deprecated 已知机型没有 270° 方向的协议值。 */
+        @Deprecated
+        ROTATE_270(-1);
 
         private final int wireValue;
 
@@ -53,7 +57,11 @@ public record DisplayGeometry(
             this.wireValue = wireValue;
         }
 
+        /** @throws IllegalArgumentException 该方向没有已知的协议值 */
         public int wireValue() {
+            if (wireValue < 0) {
+                throw new IllegalArgumentException("没有已知的方向协议值: " + this);
+            }
             return wireValue;
         }
     }

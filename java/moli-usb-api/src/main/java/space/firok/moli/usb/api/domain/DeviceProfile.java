@@ -57,7 +57,7 @@ public final class DeviceProfile {
                 LEGACY_SERIAL,
                 Optional.of(new DisplayGeometry(160, 80,
                         DisplayGeometry.Origin.TOP_LEFT,
-                        List.of(DisplayGeometry.Orientation.NORMAL),
+                        List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_180),
                         DisplayGeometry.PixelFormat.RGB565)),
                 Optional.of(StorageGeometry.defaultSerialFlash()),
                 DeviceCapabilities.of(true, true, false, false, false, true));
@@ -70,7 +70,7 @@ public final class DeviceProfile {
                 HIGH_SPEED_SERIAL,
                 Optional.of(new DisplayGeometry(160, 80,
                         DisplayGeometry.Origin.TOP_LEFT,
-                        List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_90),
+                        List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_180),
                         DisplayGeometry.PixelFormat.RGB565)),
                 Optional.of(StorageGeometry.defaultSerialFlash()),
                 DeviceCapabilities.of(true, true, true, false, false, false));
@@ -83,7 +83,7 @@ public final class DeviceProfile {
                 HIGH_SPEED_SERIAL,
                 Optional.of(new DisplayGeometry(320, 172,
                         DisplayGeometry.Origin.TOP_LEFT,
-                        List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_90),
+                        List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_180),
                         DisplayGeometry.PixelFormat.RGB565)),
                 Optional.of(StorageGeometry.defaultSerialFlash()),
                 DeviceCapabilities.of(true, true, true, true, true, false));

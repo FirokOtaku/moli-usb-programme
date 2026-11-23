@@ -7,6 +7,30 @@ import 'package:test/test.dart';
 import 'fake_transport.dart';
 
 void main() {
+  test('MINI orientation uses 1 for 180 degrees and 0 for normal', () async {
+    final port = FakeMsu2Port();
+    final session = MoliSession(port: port, profile: DeviceProfile.mini);
+    await session.connect();
+    addTearDown(session.disconnect);
+    final api = MoliDeviceApi(session);
+    expect(api.display.orientations, [0, 1]);
+
+    await api.setOrientation(1);
+    await api.setOrientation(0);
+    await expectLater(
+      api.setOrientation(2),
+      throwsA(isA<MoliException>().having(
+        (error) => error.kind,
+        'kind',
+        MoliErrorKind.unsupportedCapability,
+      )),
+    );
+    expect(
+      port.writes.map(toHex).where((hex) => hex.startsWith('02030A')),
+      ['02030A010000', '02030A000000'],
+    );
+  });
+
   test('stageLed does not apply, and applyLeds applies once', () async {
     final port = FakeMsu2Port();
     final session = MoliSession(port: port, profile: DeviceProfile.lite);

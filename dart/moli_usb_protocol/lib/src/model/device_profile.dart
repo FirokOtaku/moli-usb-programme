@@ -102,7 +102,7 @@ final class DeviceProfile {
   static final DeviceProfile mini = DeviceProfile._(
     name: nameMini,
     serial: legacySerial,
-    display: const DisplayGeometry(width: 160, height: 80, orientations: [0]),
+    display: const DisplayGeometry(width: 160, height: 80, orientations: [0, 1]),
     storage: p25d80Geometry,
     capabilities: const DeviceCapabilities(
       externalFlash: true,
@@ -153,7 +153,7 @@ final class DeviceProfile {
   static final DeviceProfile generic = DeviceProfile._(
     name: nameGeneric,
     serial: legacySerial,
-    display: const DisplayGeometry(width: 160, height: 80),
+    display: const DisplayGeometry(width: 160, height: 80, orientations: [0]),
     capabilities: const DeviceCapabilities(),
     colorPageEncoding: FlashColorPageEncoding.liteU16,
   );

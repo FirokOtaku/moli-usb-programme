@@ -452,13 +452,21 @@ class MoliDeviceTest {
         }
 
         @Test
-        @DisplayName("setOrientation 拒绝设备未声明的方向")
-        void orientationMustBeSupported() {
+        @DisplayName("MINI 方向切换使用 1 表示 180°，0 恢复正常")
+        void miniOrientationUsesCorrectWireValues() {
             ScriptedDevice device = new ScriptedDevice("COM-A");
             try (MoliDevice moli = openMini(device)) {
+                assertEquals(List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_180),
+                        moli.display().orElseThrow().orientations());
+                device.clearWrites();
+                moli.setOrientation(DisplayGeometry.Orientation.ROTATE_180);
                 moli.setOrientation(DisplayGeometry.Orientation.NORMAL);
                 assertThrows(UnsupportedCapabilityError.class,
-                        () -> moli.setOrientation(DisplayGeometry.Orientation.ROTATE_180));
+                        () -> moli.setOrientation(DisplayGeometry.Orientation.ROTATE_90));
+                List<byte[]> writes = device.frames();
+                assertEquals(2, writes.size());
+                assertArrayEquals(frame(0x02, 0x03, 0x0A, 0x01, 0x00, 0x00), writes.get(0));
+                assertArrayEquals(frame(0x02, 0x03, 0x0A, 0x00, 0x00, 0x00), writes.get(1));
             }
         }
     }

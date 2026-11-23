@@ -58,6 +58,27 @@ void main() {
     expect(orientationUnavailableReason(const [0, 1, 2, 3]), isNull);
   });
 
+  test('MINI can switch to 180 degrees and back to normal', () async {
+    final provider = FakeHostProvider();
+    final connection = _connection(provider);
+    addTearDown(connection.dispose);
+    final controls = await _connected(
+      connection: connection,
+      provider: provider,
+      profileName: DeviceProfile.nameMini,
+    );
+    addTearDown(controls.dispose);
+    expect(connection.supportedOrientations, [0, 1]);
+
+    final port = provider.lastPort!;
+    await controls.setOrientation(1);
+    expect(controls.selectedOrientation, 1);
+    expect(port.writes.last, [0x02, 0x03, 0x0A, 0x01, 0x00, 0x00]);
+    await controls.setOrientation(0);
+    expect(controls.selectedOrientation, 0);
+    expect(port.writes.last, [0x02, 0x03, 0x0A, 0x00, 0x00, 0x00]);
+  });
+
   test('unsupported capability does not attempt a device call', () async {
     final provider = FakeHostProvider();
     final connection = _connection(provider);
@@ -72,7 +93,7 @@ void main() {
     expect(connection.capabilities?.backlight, isFalse);
     expect(connection.capabilities?.rgbLed, isFalse);
     expect(connection.hasKeyInput, isFalse);
-    expect(connection.supportedOrientations, isNotEmpty);
+    expect(connection.supportedOrientations, [0]);
     final calls = connection.submittedActions;
     final writes = provider.lastPort!.writes.length;
 

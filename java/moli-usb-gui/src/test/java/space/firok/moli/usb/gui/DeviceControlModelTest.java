@@ -61,7 +61,7 @@ class DeviceControlModelTest {
                 List.of(),
                 DeviceProfile.MINI);
         assertEquals(DeviceControlModel.ORIENTATION_NONE, DeviceControlModel.orientationHint(noGeometry));
-        assertFalse(model.requestOrientation(noGeometry, DisplayGeometry.Orientation.ROTATE_90));
+        assertFalse(model.requestOrientation(noGeometry, DisplayGeometry.Orientation.ROTATE_180));
         assertEquals(0, calls.get());
     }
 
@@ -75,7 +75,7 @@ class DeviceControlModelTest {
         }, Runnable::run);
         ConnectionSnapshot capable = snapshot(
                 DeviceCapabilities.of(true, false, true, false, false, false),
-                List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_90),
+                List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_180),
                 DeviceProfile.MINI);
         assertTrue(model.requestLeds(capable, 9, 8, 7, 3));
         assertEquals(List.of("setLed:0:9:8:7", "setLed:1:9:8:7", "setLed:2:9:8:7", "applyLeds"), calls);

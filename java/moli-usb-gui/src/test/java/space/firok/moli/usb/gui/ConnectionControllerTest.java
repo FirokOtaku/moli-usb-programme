@@ -466,7 +466,7 @@ class ConnectionControllerTest {
         gateway.capabilities = DeviceCapabilities.of(true, false, true, false, false, true);
         gateway.orientations = List.of(
                 DisplayGeometry.Orientation.NORMAL,
-                DisplayGeometry.Orientation.ROTATE_90);
+                DisplayGeometry.Orientation.ROTATE_180);
         controller = controller(Duration.ofHours(1));
         controller.selectCandidate(candidate("UID-1", "COM3"));
         controller.selectProfile(DeviceProfile.mini());
@@ -479,7 +479,7 @@ class ConnectionControllerTest {
         assertTrue(connected.capabilities().rgbLeds());
         assertFalse(connected.capabilities().backlight());
         assertTrue(connected.capabilities().buttonInput());
-        assertEquals(List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_90),
+        assertEquals(List.of(DisplayGeometry.Orientation.NORMAL, DisplayGeometry.Orientation.ROTATE_180),
                 connected.orientations());
 
         controller.disconnect();

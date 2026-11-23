@@ -83,7 +83,11 @@ class _CapabilityPanelState extends State<CapabilityPanel> {
                       for (final value in orientations)
                         DropdownMenuItem<int>(
                           value: value,
-                          child: Text('方向 $value'),
+                          child: Text(switch (value) {
+                            0 => '正常',
+                            1 => '旋转 180°',
+                            _ => '方向 $value',
+                          }),
                         ),
                     ],
                     onChanged: orientationEnabled

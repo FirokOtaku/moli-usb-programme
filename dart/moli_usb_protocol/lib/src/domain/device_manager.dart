@@ -23,6 +23,7 @@ import '../model/device_id.dart';
 import '../model/device_info.dart';
 import '../model/device_profile.dart';
 import '../model/display_geometry.dart';
+import '../model/image_frame.dart';
 import '../model/input_event.dart';
 import '../session/session.dart';
 import '../session/session_options.dart';
@@ -360,6 +361,29 @@ final class MoliDeviceApi {
     }
     return drawPixelsRle(rect, pixels, token: token);
   }
+
+  /// Converts, scales and sends a decoded image. Without [rect], fills the panel.
+  Future<void> writeImage(
+    RgbaImage image, {
+    Rect? rect,
+    ImageWriteOptions options = const ImageWriteOptions(),
+    CancelToken? token,
+  }) => session.writeImage(image, rect: rect, options: options, token: token);
+
+  /// Controls the first resize warning for this session.
+  void setImageResolutionWarningEnabled(bool enabled) =>
+      session.setImageResolutionWarningEnabled(enabled);
+
+  /// Creates a bounded sender that drains before the device closes.
+  ImageWriteQueue createImageWriteQueue({
+    required int capacity,
+    required ImageOverflowPolicy overflowPolicy,
+    ImageWriteOptions options = const ImageWriteOptions(),
+  }) => session.createImageWriteQueue(
+    capacity: capacity,
+    overflowPolicy: overflowPolicy,
+    options: options,
+  );
 
   /// Shows a color asset stored in device Flash at [page].
   Future<void> showFlashColor(int page, {CancelToken? token}) =>

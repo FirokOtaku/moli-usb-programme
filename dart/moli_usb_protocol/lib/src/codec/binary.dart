@@ -47,6 +47,20 @@ extension type const Rgb565Color(int value) {
     int blue,
   ) => Rgb565Color((red << 11) | (green << 5) | blue);
 
+  /// Quantizes 8-bit RGB channels, clamping each to 0..255.
+  static Rgb565Color fromRgb888(int red, int green, int blue) => fromComponents(
+    red.clamp(0, 255) >> 3,
+    green.clamp(0, 255) >> 2,
+    blue.clamp(0, 255) >> 3,
+  );
+
+  /// Converts a packed `0xRRGGBB` color.
+  static Rgb565Color fromRgb(int rgb) =>
+      fromRgb888((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+
+  /// Converts a packed `0xAARRGGBB` color, ignoring alpha.
+  static Rgb565Color fromArgb(int argb) => fromRgb(argb);
+
   /// The red channel, 0..31.
   int get red => (value >> 11) & 0x1F;
 

@@ -13,6 +13,7 @@
 // it starts from the caller's [DeviceProfile] and prefers device-reported facts.
 
 import 'dart:async';
+import 'dart:collection';
 import 'dart:typed_data';
 
 import '../codec/adc_rle.dart';
@@ -27,11 +28,14 @@ import '../model/device_info.dart';
 import '../model/device_id.dart';
 import '../model/device_profile.dart';
 import '../model/display_geometry.dart';
+import '../model/image_frame.dart';
 import '../model/input_event.dart';
 import '../transport/serial_settings.dart';
 import '../transport/transport.dart';
 import 'serial_queue.dart';
 import 'session_options.dart';
+
+part 'image_write_queue.dart';
 
 /// A connected, handshaken MSU2 device.
 ///
@@ -88,7 +92,13 @@ final class MoliSession {
 
   DeviceInfo? _info;
   bool _connected = false;
-  bool _closing = false;
+  Future<void>? _disconnection;
+  final _imageQueues = <ImageWriteQueue>{};
+  bool _resolutionWarningIssued = false;
+  bool _imageResolutionWarningEnabled = const bool.fromEnvironment(
+    'space.firok.moli.usb.warnImageResize',
+    defaultValue: true,
+  );
 
   StreamController<InputEvent>? _inputController;
   Timer? _inputTimer;
@@ -202,15 +212,17 @@ final class MoliSession {
     });
   }
 
-  /// Closes the transport and stops input polling. Idempotent.
-  Future<void> disconnect() async {
-    if (_closing) return;
-    _closing = true;
+  /// Drains the image queues, stops input polling and closes the transport.
+  Future<void> disconnect() => _disconnection ??= _disconnect();
+
+  Future<void> _disconnect() async {
+    if (_imageQueues.isNotEmpty) {
+      await Future.wait(_imageQueues.toList().map((queue) => queue.close()));
+    }
     _connected = false;
     await _stopInput();
     _queue.close();
     await _port.close();
-    _closing = false;
   }
 
   // ------------------------------------------------------------- transactions
@@ -412,6 +424,63 @@ final class MoliSession {
     }
     await _displayTransaction(rect, _display.beginStream(), RleCodec.encode(rgb565Pixels),
         token: token, operation: 'drawPixelsRle');
+  }
+
+  /// Scales and writes [image] to [rect], or to the whole panel by default.
+  Future<void> writeImage(
+    RgbaImage image, {
+    Rect? rect,
+    ImageWriteOptions options = const ImageWriteOptions(),
+    CancelToken? token,
+  }) async {
+    _requireDisplay(token);
+    final geometry = displayGeometry;
+    final target = rect ?? Rect(0, 0, geometry.width, geometry.height);
+    target.ensureWithin(
+      geometry.width,
+      geometry.height,
+      operation: 'writeImage',
+    );
+    if (_imageResolutionWarningEnabled &&
+        !_resolutionWarningIssued &&
+        (image.width != target.width || image.height != target.height)) {
+      _resolutionWarningIssued = true;
+      print(
+        'WARNING: MSU2 ${deviceId?.value}: image ${image.width}x${image.height} '
+        'will be resized to ${target.width}x${target.height} before sending '
+        '(panel ${geometry.width}x${geometry.height}).',
+      );
+    }
+    final pixels = image.toRgb565(target.width, target.height, options: options);
+    final compact = options.compression == ImageCompression.profileCompact;
+    final miniCompact = compact && profile.name == DeviceProfile.nameMini;
+    if (options.compression == ImageCompression.rle ||
+        (compact && !miniCompact)) {
+      await drawPixelsRle(target, [
+        for (final pixel in pixels) pixel.value,
+      ], token: token);
+    } else {
+      await drawPixels(target, pixels, token: token, miniCompact: miniCompact);
+    }
+  }
+
+  /// Overrides the default value of `space.firok.moli.usb.warnImageResize`.
+  void setImageResolutionWarningEnabled(bool enabled) {
+    _imageResolutionWarningEnabled = enabled;
+  }
+
+  /// Creates an asynchronous sender that is drained on [disconnect].
+  ImageWriteQueue createImageWriteQueue({
+    required int capacity,
+    required ImageOverflowPolicy overflowPolicy,
+    ImageWriteOptions options = const ImageWriteOptions(),
+  }) {
+    if (capacity < 1) throw RangeError.range(capacity, 1, null, 'capacity');
+    if (_disconnection != null) throw StateError('session is closing or closed');
+    _requireDisplay(null);
+    final queue = ImageWriteQueue._(this, capacity, overflowPolicy, options);
+    _imageQueues.add(queue);
+    return queue;
   }
 
   // ------------------------------------------------------------------ SFR API

@@ -59,6 +59,43 @@ dart compile js  example/main.dart -o build/example.js
 dart compile exe example/main.dart -o build/example.exe
 ```
 
+## 写入宿主图像
+
+`RgbaImage` 接收已解码的 sRGB RGBA8888 字节（行优先、非预乘 alpha），不依赖
+Flutter 或图片解码库。Flutter 调用方可用 `ui.ImageByteFormat.rawStraightRgba`
+取得所需数据。单个颜色可用 `Rgb565Color.fromRgb(0xRRGGBB)` 或
+`Rgb565Color.fromArgb(0xAARRGGBB)` 转换，后者忽略 alpha。
+
+```dart
+final image = RgbaImage(width, height, rgbaBytes);
+const options = ImageWriteOptions(
+  alphaMode: ImageAlphaMode.composite,
+  alphaBackground: Rgb565Colors.black,
+  scaleMode: ImageScaleMode.fit,
+  compression: ImageCompression.profileCompact,
+);
+await device.writeImage(image, options: options); // 默认适配整屏，可传 rect
+
+final queue = device.createImageWriteQueue(
+  capacity: 1,
+  overflowPolicy: ImageOverflowPolicy.dropOldest,
+  options: options,
+);
+final result = await queue.submit(image); // sent 或 dropped；发送失败则抛错
+await queue.close();
+```
+
+缩放可选等比留边 `fit`、等比居中裁切 `fill` 或拉伸 `stretch`；传输编码独立选择
+`none`、`rle` 或 `profileCompact`（MINI 用暂存区紧凑编码，其余用 RLE）。目标尺寸
+不一致时，每个会话首次缩放会输出一条 `WARNING`。可通过
+`device.setImageResolutionWarningEnabled(false)` 或 Dart 编译环境参数
+`-Dspace.firok.moli.usb.warnImageResize=false` 关闭。
+
+队列容量只计待发帧，不计正在发送的帧。队列满时可等待空位（`block`）、丢新帧
+（`dropNewest`），或替换最早的待发帧（`dropOldest`）；不会中断当前传输。
+选择 `block` 时，生产者应等待 `submit` 返回的 Future，避免在调用方积压。
+关闭队列或设备会先等已接受的帧处理完成。
+
 ## 已实现 / 未实现
 
 已实现（纯编码与状态机均已测试）：

@@ -82,6 +82,8 @@ final class FakeMsu2Port implements TransportPort {
   /// later, the way the rest of an in-flight `\0MSNxx` arrives on the wire.
   bool completeBannerTail = false;
 
+  Future<void> Function()? beforeBulkWrite;
+
   bool _isClosed = false;
 
   @override
@@ -135,6 +137,8 @@ final class FakeMsu2Port implements TransportPort {
   }) async {
     token?.ensureNotCancelled(operation: 'fake.write');
     writeAttempts++;
+    final gate = beforeBulkWrite;
+    if (gate != null && bytes.length > kFrameLength) await gate();
     if (disconnected) {
       throw MoliException.disconnected(
         'fake link lost',

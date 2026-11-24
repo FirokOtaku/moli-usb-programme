@@ -25,6 +25,13 @@ export 'src/model/device_profile.dart'
     show DeviceProfile, FlashMediumProfileKind;
 export 'src/model/display_geometry.dart'
     show DisplayGeometry, DisplayOrigin, PixelFormat;
+export 'src/model/image_frame.dart'
+    show
+        RgbaImage,
+        ImageWriteOptions,
+        ImageAlphaMode,
+        ImageScaleMode,
+        ImageCompression;
 export 'src/model/input_event.dart' show InputEvent, InputSource, InputState;
 
 // ---------------------------------------------------------- domain operations
@@ -32,7 +39,8 @@ export 'src/domain/device_manager.dart'
     show MoliDeviceManager, MoliDeviceApi, DeviceSelector;
 
 // ------------------------------------------------------------------- session
-export 'src/session/session.dart' show MoliSession;
+export 'src/session/session.dart'
+    show MoliSession, ImageWriteQueue, ImageOverflowPolicy, ImageSendResult;
 export 'src/session/session_options.dart' show SessionOptions;
 
 // ----------------------------------------------------------------- transport

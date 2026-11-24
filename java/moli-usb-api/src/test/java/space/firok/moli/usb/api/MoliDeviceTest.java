@@ -34,9 +34,11 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 领域门面测试：验证枚举/打开、能力门控、显示、存储与输入的对外行为。
@@ -168,6 +170,52 @@ class MoliDeviceTest {
             api.closeAll();
             assertFalse(device.isOpen("COM-A"));
             assertFalse(device.isOpen("COM-B"));
+        }
+    }
+
+    @Nested
+    @DisplayName("宿主图像写入")
+    class HostImageWriting {
+
+        @Test
+        @DisplayName("按选项转换并写入图像区域")
+        void writesBufferedImageToRect() {
+            ScriptedDevice scripted = new ScriptedDevice("COM-A");
+            try (MoliDevice device = openMini(scripted)) {
+                device.setImageResolutionWarningEnabled(false);
+                BufferedImage image = new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB);
+                image.setRGB(0, 0, 0x00FF0000);
+                ImageWriteOptions options = new ImageWriteOptions(
+                        ImageWriteOptions.AlphaMode.IGNORE, Rgb565.BLACK,
+                        ImageWriteOptions.ScaleMode.STRETCH, Rgb565.BLACK,
+                        ImageWriteOptions.Compression.NONE);
+
+                device.writeImage(new Rect(0, 0, 1, 1), image, options);
+
+                assertTrue(scripted.frames().stream().anyMatch(frame ->
+                        (frame[0] & 0xFF) == Commands.SCRATCH
+                                && (frame[2] & 0xFF) == 0xF8
+                                && (frame[3] & 0xFF) == 0x00));
+            }
+        }
+
+        @Test
+        @DisplayName("异步队列发送图像并返回完成状态")
+        void imageQueueSendsFrame() throws Exception {
+            ScriptedDevice scripted = new ScriptedDevice("COM-A");
+            try (MoliDevice device = openMini(scripted);
+                 ImageWriteQueue queue = device.createImageWriteQueue(1,
+                         ImageWriteQueue.OverflowPolicy.DROP_OLDEST,
+                         new ImageWriteOptions(ImageWriteOptions.AlphaMode.IGNORE, Rgb565.BLACK,
+                                 ImageWriteOptions.ScaleMode.STRETCH, Rgb565.BLACK,
+                                 ImageWriteOptions.Compression.NONE))) {
+                device.setImageResolutionWarningEnabled(false);
+                BufferedImage image = new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB);
+                image.setRGB(0, 0, 0x0000FF00);
+
+                assertEquals(ImageWriteQueue.SendResult.SENT,
+                        queue.submit(image).get(2, TimeUnit.SECONDS));
+            }
         }
     }
 

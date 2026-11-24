@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import space.firok.moli.usb.api.InputSubscription;
+import space.firok.moli.usb.api.ImageWriteOptions;
+import space.firok.moli.usb.api.ImageWriteQueue;
 import space.firok.moli.usb.api.MoliDevice;
 import space.firok.moli.usb.api.domain.DeviceCapabilities;
 import space.firok.moli.usb.api.domain.DeviceId;
@@ -20,6 +22,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -217,6 +220,27 @@ class DeviceControlModelTest {
 
         @Override
         public void streamImageRle(Rect rect, int[] pixels, int maxFrames) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void writeImage(BufferedImage image, ImageWriteOptions options) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void writeImage(Rect rect, BufferedImage image, ImageWriteOptions options) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void setImageResolutionWarningEnabled(boolean enabled) {
+        }
+
+        @Override
+        public ImageWriteQueue createImageWriteQueue(int capacity,
+                                                      ImageWriteQueue.OverflowPolicy overflowPolicy,
+                                                      ImageWriteOptions options) {
             throw new UnsupportedOperationException();
         }
 

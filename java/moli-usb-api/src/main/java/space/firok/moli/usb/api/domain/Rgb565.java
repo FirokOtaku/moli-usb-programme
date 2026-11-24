@@ -1,5 +1,8 @@
 package space.firok.moli.usb.api.domain;
 
+import java.awt.Color;
+import java.util.Objects;
+
 /**
  * 领域层：RGB565 颜色值。
  *
@@ -34,6 +37,22 @@ public record Rgb565(int value) {
         int g6 = Math.clamp(g, 0, 255) >> 2;
         int b5 = Math.clamp(b, 0, 255) >> 3;
         return new Rgb565((r5 << 11) | (g6 << 5) | b5);
+    }
+
+    /** Converts {@code 0xRRGGBB} to RGB565. */
+    public static Rgb565 fromRgb(int rgb) {
+        return fromRgb888((rgb >>> 16) & 0xFF, (rgb >>> 8) & 0xFF, rgb & 0xFF);
+    }
+
+    /** Converts {@code 0xAARRGGBB} to RGB565, ignoring alpha. */
+    public static Rgb565 fromArgb(int argb) {
+        return fromRgb(argb);
+    }
+
+    /** Converts a color to RGB565, ignoring its alpha component. */
+    public static Rgb565 fromColor(Color color) {
+        Objects.requireNonNull(color, "color");
+        return fromRgb888(color.getRed(), color.getGreen(), color.getBlue());
     }
 
     /** 高字节（线上先发送）。 */

@@ -8,6 +8,7 @@ import space.firok.moli.usb.api.domain.Rect;
 import space.firok.moli.usb.api.domain.Rgb565;
 import space.firok.moli.usb.api.domain.StorageGeometry;
 
+import java.awt.image.BufferedImage;
 import java.util.Optional;
 import java.util.function.Consumer;
 
@@ -122,6 +123,30 @@ public interface MoliDevice extends AutoCloseable {
     default void streamImageCompact(Rect rect, int[] pixels) {
         streamImageRle(rect, pixels, 0);
     }
+
+    /** Converts, scales, encodes and writes a full-screen host image. */
+    void writeImage(BufferedImage image, ImageWriteOptions options);
+
+    /** Converts, scales, encodes and writes a host image into the target rectangle. */
+    void writeImage(Rect rect, BufferedImage image, ImageWriteOptions options);
+
+    default void writeImage(BufferedImage image) {
+        writeImage(image, ImageWriteOptions.defaults());
+    }
+
+    /**
+     * Enables or disables the once-per-device resolution mismatch warning.
+     * The default can be changed at process startup with
+     * {@code -Dspace.firok.moli.usb.warnImageResize=false}.
+     */
+    void setImageResolutionWarningEnabled(boolean enabled);
+
+    /**
+     * Creates a bounded asynchronous image sender tied to this device's lifetime.
+     * Closing the queue drains frames already queued; closing the device closes its queues first.
+     */
+    ImageWriteQueue createImageWriteQueue(int capacity, ImageWriteQueue.OverflowPolicy overflowPolicy,
+                                          ImageWriteOptions options);
 
     /** 读取外部存储的连续字节。地址越界抛 {@code OutOfBoundsError}。 */
     byte[] readStorage(long address, int length);

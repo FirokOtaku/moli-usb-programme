@@ -32,12 +32,16 @@ import space.firok.moli.usb.api.session.CancellationToken;
 import space.firok.moli.usb.api.session.ProtocolSession;
 import space.firok.moli.usb.api.transport.Transport;
 
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
@@ -47,6 +51,8 @@ import java.util.function.Consumer;
  */
 final class MoliDeviceImpl implements MoliDevice {
 
+    private static final System.Logger LOGGER = System.getLogger(MoliDeviceImpl.class.getName());
+
     private final DeviceId id;
     private final DeviceProfile profile;
     private final ProtocolSession session;
@@ -55,6 +61,10 @@ final class MoliDeviceImpl implements MoliDevice {
     private final StorageGeometry storage;
     private final DisplayGeometry display;
     private final PageAddressOrder pageOrder;
+    private final Set<ImageWriteQueue> imageWriteQueues = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean resolutionWarningIssued = new AtomicBoolean();
+    private volatile boolean imageResolutionWarningEnabled =
+            !"false".equalsIgnoreCase(System.getProperty("space.firok.moli.usb.warnImageResize", "true"));
 
     private MoliDeviceImpl(DeviceId id, DeviceProfile profile, ProtocolSession session,
                            DeviceInfo info, DeviceCapabilities capabilities,
@@ -271,6 +281,72 @@ final class MoliDeviceImpl implements MoliDevice {
             throw new InvalidArgumentError("streamImageCompact", id.toString(), "像素数量与区域不符");
         }
         writeImage(rect, PixelStreamCodec.encodeMiniCompactStream(pixels), "streamImageCompact");
+    }
+
+    @Override
+    public void writeImage(BufferedImage image, ImageWriteOptions options) {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(options, "options");
+        requireDisplay("writeImage");
+        if (display == null) {
+            throw new UnsupportedCapabilityError("writeImage", id.toString(), "设备未报告显示几何");
+        }
+        writeImage(new Rect(0, 0, display.width(), display.height()), image, options);
+    }
+
+    @Override
+    public void writeImage(Rect rect, BufferedImage image, ImageWriteOptions options) {
+        Objects.requireNonNull(rect, "rect");
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(options, "options");
+        requireDisplay("writeImage");
+        requireWithinDisplay(rect, "writeImage");
+        warnOnResolutionMismatch(image);
+        int[] pixels = ImageFrameConverter.convert(image, rect.width(), rect.height(), options);
+        switch (options.compression()) {
+            case NONE -> streamImage(rect, pixels);
+            case RLE -> streamImageRle(rect, pixels, 0);
+            case PROFILE_COMPACT -> streamImageCompact(rect, pixels);
+        }
+    }
+
+    @Override
+    public void setImageResolutionWarningEnabled(boolean enabled) {
+        imageResolutionWarningEnabled = enabled;
+    }
+
+    @Override
+    public ImageWriteQueue createImageWriteQueue(int capacity,
+                                                  ImageWriteQueue.OverflowPolicy overflowPolicy,
+                                                  ImageWriteOptions options) {
+        if (capacity <= 0) {
+            throw new InvalidArgumentError("createImageWriteQueue", id.toString(),
+                    "capacity 必须大于 0");
+        }
+        Objects.requireNonNull(overflowPolicy, "overflowPolicy");
+        Objects.requireNonNull(options, "options");
+        if (!session.isOpen()) {
+            throw new IllegalStateException("device is closed");
+        }
+        ImageWriteQueue queue = new ImageWriteQueue(this, options, capacity, overflowPolicy,
+                imageWriteQueues::remove);
+        imageWriteQueues.add(queue);
+        if (!session.isOpen()) {
+            queue.close();
+            throw new IllegalStateException("device is closed");
+        }
+        return queue;
+    }
+
+    private void warnOnResolutionMismatch(BufferedImage image) {
+        if (imageResolutionWarningEnabled && display != null
+                && (image.getWidth() != display.width() || image.getHeight() != display.height())
+                && resolutionWarningIssued.compareAndSet(false, true)) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Image {0}x{1} does not match screen resolution {2}x{3}; "
+                            + "the image will be scaled before sending to device {4}.",
+                    image.getWidth(), image.getHeight(), display.width(), display.height(), id);
+        }
     }
 
     private void writeImage(Rect rect, List<Frame> frames, String operation) {
@@ -690,6 +766,9 @@ final class MoliDeviceImpl implements MoliDevice {
 
     @Override
     public void close() {
+        for (ImageWriteQueue queue : Set.copyOf(imageWriteQueues)) {
+            queue.close();
+        }
         session.close();
     }
 }
